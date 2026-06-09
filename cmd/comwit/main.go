@@ -121,6 +121,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return apps(args[1:], stdout)
 	case "deploy":
 		return deploy(args[1:], stdout, stderr)
+	case "upgrade", "update", "self-update":
+		return upgrade(args[1:], stdout)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return nil
@@ -141,6 +143,7 @@ func usage(w io.Writer) {
   comwit apps create --project <id> --name <name>
   comwit apps builds --project <id> --app <id>
   comwit deploy --project <id> --app <id> --package <dist/brrrd tar.zst or dir>
+  comwit upgrade                              (self-update to the latest release)
 
 Environment:
   COMWIT_CONFIG   Override config file path.

@@ -26,6 +26,7 @@ comwit projects list
 comwit databases create --project <id> --name <name>
 comwit databases list --project <id>
 comwit apps ...                      # see `comwit --help`
+comwit upgrade                       # self-update to the latest release
 comwit version
 ```
 
