@@ -12,7 +12,7 @@ for platform in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
   os="${platform%_*}"; arch="${platform#*_}"
   echo "building $platform..."
   GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-    go build -trimpath -ldflags "-s -w -X main.version=$ver" -o dist/comwit ./cmd/comwit
+    go build -trimpath -ldflags "-s -w" -o dist/comwit ./cmd/comwit
   tar -C dist -czf "dist/comwit_${platform}.tar.gz" comwit
   rm dist/comwit
 done
