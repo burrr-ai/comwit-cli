@@ -12,6 +12,20 @@ curl -fsSL https://raw.githubusercontent.com/burrr-ai/comwit-cli/main/install.sh
 This downloads the binary for your OS/arch from the latest [release](https://github.com/burrr-ai/comwit-cli/releases),
 verifies its checksum, and installs it to `/usr/local/bin` (or `~/.local/bin`).
 
+## GitHub Actions
+
+Use the setup action to install `comwit` and add it to `PATH` for later steps:
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: burrr-ai/comwit-cli@v0
+    with:
+      version: v0.1.4 # optional; omit to install the latest release
+
+  - run: comwit version
+```
+
 Or with Go:
 
 ```sh
