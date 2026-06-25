@@ -291,7 +291,7 @@ func TestUpdateInstallsLatestReleaseAsset(t *testing.T) {
 	var sawDownload bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/burrr-ai/comwit-cloud/releases/latest":
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/burrr-ai/comwit-cli/releases/latest":
 			sawRelease = true
 			if got := r.Header.Get("Authorization"); got != "Bearer ghs_test" {
 				t.Fatalf("auth = %q", got)
@@ -360,7 +360,7 @@ func TestUpdateReportsMissingPlatformAsset(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/repos/burrr-ai/comwit-cloud/releases/tags/v1.2.3" {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/burrr-ai/comwit-cli/releases/tags/v1.2.3" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -403,10 +403,10 @@ func TestUpdateAssetAndReleasePath(t *testing.T) {
 	if _, err := updateAssetName("freebsd", "amd64"); err == nil {
 		t.Fatal("expected unsupported OS error")
 	}
-	if got, want := mustGitHubReleasePath(t, "burrr-ai/comwit-cloud", "latest"), "/repos/burrr-ai/comwit-cloud/releases/latest"; got != want {
+	if got, want := mustGitHubReleasePath(t, "burrr-ai/comwit-cli", "latest"), "/repos/burrr-ai/comwit-cli/releases/latest"; got != want {
 		t.Fatalf("latest path = %q, want %q", got, want)
 	}
-	if got, want := mustGitHubReleasePath(t, "burrr-ai/comwit-cloud", "v1.2.3"), "/repos/burrr-ai/comwit-cloud/releases/tags/v1.2.3"; got != want {
+	if got, want := mustGitHubReleasePath(t, "burrr-ai/comwit-cli", "v1.2.3"), "/repos/burrr-ai/comwit-cli/releases/tags/v1.2.3"; got != want {
 		t.Fatalf("tag path = %q, want %q", got, want)
 	}
 }

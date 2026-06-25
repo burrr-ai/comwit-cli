@@ -21,10 +21,10 @@ import (
 )
 
 const (
-	version             = "0.1.2"
+	version             = "0.1.3"
 	defaultAPIURL       = "https://api.cloud.comwit.io"
 	defaultGitHubAPIURL = "https://api.github.com"
-	defaultGitHubRepo   = "burrr-ai/comwit-cloud"
+	defaultGitHubRepo   = "burrr-ai/comwit-cli"
 )
 
 type configFile struct {
