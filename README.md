@@ -38,6 +38,7 @@ go install github.com/burrr-ai/comwit-cli/cmd/comwit@latest
 comwit login --token <cwt_token>     # authenticate (token from the dashboard)
 comwit projects list
 comwit databases create --project <id> --name <name>
+comwit databases import-dump --project <id> --name <name> --from-dump dump.sql
 comwit databases list --project <id>
 comwit apps ...                      # see `comwit --help`
 comwit update                        # self-update to the latest release
