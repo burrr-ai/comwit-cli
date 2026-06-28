@@ -1,0 +1,5 @@
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);
+INSERT INTO notes VALUES(1,'hello; sqlite');
+COMMIT;

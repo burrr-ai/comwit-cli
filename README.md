@@ -21,7 +21,7 @@ steps:
   - uses: actions/checkout@v4
   - uses: burrr-ai/comwit-cli@v0
     with:
-      version: v0.1.4 # optional; omit to install the latest release
+      version: v0.1.5 # optional; omit to install the latest release
 
   - run: comwit version
 ```

@@ -6,7 +6,7 @@ branding:
 
 inputs:
   version:
-    description: comwit release tag to install, for example v0.1.4. Defaults to the latest release.
+    description: comwit release tag to install, for example v0.1.5. Defaults to the latest release.
     required: false
     default: ""
 

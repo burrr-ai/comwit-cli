@@ -280,6 +280,216 @@ func TestDatabaseDeleteAndTokenRotateUseProjectScopedAPI(t *testing.T) {
 	}
 }
 
+func TestSplitSQLDumpFixtures(t *testing.T) {
+	tests := []struct {
+		name      string
+		wantMin   int
+		wantSkip  int
+		wantMatch string
+	}{
+		{name: "sqlite_dump.sql", wantMin: 5, wantMatch: "hello; sqlite"},
+		{name: "d1_dump.sql", wantMin: 5, wantSkip: 2, wantMatch: "Grace; Hopper"},
+		{name: "turso_dump.sql", wantMin: 6, wantMatch: "CREATE TRIGGER"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			statements, skipped, err := loadDumpStatements(filepath.Join("testdata", tt.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(statements) < tt.wantMin {
+				t.Fatalf("statements = %d, want at least %d: %#v", len(statements), tt.wantMin, statements)
+			}
+			if len(skipped) != tt.wantSkip {
+				t.Fatalf("skipped = %d, want %d: %#v", len(skipped), tt.wantSkip, skipped)
+			}
+			var joined strings.Builder
+			for _, statement := range statements {
+				joined.WriteString(statement.SQL)
+				joined.WriteByte('\n')
+			}
+			if !strings.Contains(joined.String(), tt.wantMatch) {
+				t.Fatalf("joined statements missing %q:\n%s", tt.wantMatch, joined.String())
+			}
+		})
+	}
+}
+
+func TestSplitSQLDumpTriggerBodyStaysOneStatement(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "turso_dump.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements, err := splitSQLDump(string(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var triggerCount int
+	for _, statement := range statements {
+		if strings.Contains(statement.SQL, "CREATE TRIGGER") {
+			triggerCount++
+			if !strings.Contains(statement.SQL, "trigger; body") || !strings.Contains(statement.SQL, "CASE WHEN") {
+				t.Fatalf("trigger statement was truncated: %s", statement.SQL)
+			}
+		}
+	}
+	if triggerCount != 1 {
+		t.Fatalf("triggerCount = %d, want 1: %#v", triggerCount, statements)
+	}
+}
+
+func TestSplitSQLDumpTriggerWithCaseStatement(t *testing.T) {
+	input := `CREATE TRIGGER audit_ai AFTER INSERT ON audit
+BEGIN
+  INSERT INTO audit_log VALUES(CASE WHEN new.name = 'x' THEN 'x;y' ELSE 'z' END);
+  INSERT INTO audit_log VALUES('done');
+END;
+CREATE TABLE after_trigger(id INTEGER);`
+	statements, err := splitSQLDump(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statements) != 2 {
+		t.Fatalf("statements = %d, want 2: %#v", len(statements), statements)
+	}
+	if !strings.Contains(statements[0].SQL, "INSERT INTO audit_log VALUES('done')") {
+		t.Fatalf("trigger statement split early: %s", statements[0].SQL)
+	}
+	if !strings.Contains(statements[1].SQL, "CREATE TABLE after_trigger") {
+		t.Fatalf("second statement = %s", statements[1].SQL)
+	}
+}
+
+func TestSplitSQLDumpRejectsSQLiteDatabaseFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.db")
+	if err := os.WriteFile(path, append([]byte("SQLite format 3\x00"), []byte("rest")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := loadDumpStatements(path)
+	if err == nil {
+		t.Fatal("expected .db rejection")
+	}
+	if !strings.Contains(err.Error(), "looks like a SQLite .db") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDatabasesImportDumpCreatesDatabaseAndReplaysHranaBatch(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawCreate bool
+	var sawHrana bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/proj_1/databases":
+			sawCreate = true
+			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+				t.Fatalf("platform auth = %q", got)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["name"] != "imported" {
+				t.Fatalf("create body = %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"database_id":"db_1","database_url":"` + serverURL(r) + `/v1/db_1","created":true,"database_token":"tenant-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/db_1/v3/pipeline":
+			sawHrana = true
+			if got := r.Header.Get("Authorization"); got != "Bearer tenant-token" {
+				t.Fatalf("database auth = %q", got)
+			}
+			var request hranaPipelineRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if len(request.Requests) != 1 || request.Requests[0].Type != "batch" || request.Requests[0].Batch == nil {
+				t.Fatalf("request = %#v", request)
+			}
+			steps := request.Requests[0].Batch.Steps
+			if len(steps) < 5 {
+				t.Fatalf("steps = %d, want at least 5", len(steps))
+			}
+			if steps[1].Condition == nil || steps[1].Condition.Type != "ok" || steps[1].Condition.Step != 0 {
+				t.Fatalf("step condition = %#v", steps[1].Condition)
+			}
+			if !strings.Contains(steps[3].Stmt.SQL, "hello; sqlite") {
+				t.Fatalf("insert statement = %q", steps[3].Stmt.SQL)
+			}
+			_, _ = w.Write([]byte(`{"baton":null,"base_url":null,"results":[{"type":"ok","response":{"type":"batch","result":{"step_errors":[null,null,null,null,null]}}}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{"databases", "import-dump", "--name", "imported", "--from-dump", filepath.Join("testdata", "sqlite_dump.sql")}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawCreate || !sawHrana {
+		t.Fatalf("sawCreate=%t sawHrana=%t", sawCreate, sawHrana)
+	}
+	if !strings.Contains(stdout.String(), "imported\tdb_1") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "token\ttenant-token") {
+		t.Fatalf("stdout missing token = %q", stdout.String())
+	}
+}
+
+func TestDatabasesImportDumpDeletesCreatedDatabaseOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+	dumpPath := filepath.Join(dir, "dump.sql")
+	if err := os.WriteFile(dumpPath, []byte("CREATE TABLE t(id INTEGER PRIMARY KEY);\nINSERT INTO t VALUES(1);\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawDelete bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/proj_1/databases":
+			_, _ = w.Write([]byte(`{"database_id":"db_1","database_url":"` + serverURL(r) + `/v1/db_1","created":true,"database_token":"tenant-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/db_1/v3/pipeline":
+			_, _ = w.Write([]byte(`{"baton":null,"base_url":null,"results":[{"type":"ok","response":{"type":"batch","result":{"step_errors":[null,{"message":"constraint failed","code":"SQL_ERROR"}]}}}]}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/projects/proj_1/databases/db_1":
+			sawDelete = true
+			_, _ = w.Write([]byte(`{"ok":true,"database":{"database_id":"db_1","database_url":"` + serverURL(r) + `/v1/db_1","status":"deleted"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{"databases", "import-dump", "--name", "imported", "--from-dump", dumpPath}, &stdout, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected import error")
+	}
+	if !sawDelete {
+		t.Fatal("created database was not deleted")
+	}
+	if !strings.Contains(err.Error(), "statement 2 failed") || !strings.Contains(err.Error(), "INSERT INTO t") {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "failed_database_deleted\tdb_1") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestUpdateInstallsLatestReleaseAsset(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "comwit")
 	if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {

@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	version             = "0.1.4"
+	version             = "0.1.5"
 	defaultAPIURL       = "https://api.cloud.comwit.io"
 	defaultGitHubAPIURL = "https://api.github.com"
 	defaultGitHubRepo   = "burrr-ai/comwit-cli"
@@ -321,6 +321,7 @@ func usage(w io.Writer) {
   comwit login --token <token> [--project <id>]
   comwit projects list
   comwit databases create --project <id> --name <name>
+  comwit databases import-dump --project <id> --name <name> --from-dump dump.sql [--keep-failed-db]
   comwit databases list --project <id>
   comwit databases delete --project <id> --database <id>
   comwit databases token rotate --project <id> --database <id>
@@ -706,7 +707,7 @@ func openBrowser(target string) error {
 
 func databases(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: comwit databases <create|list|delete|token>")
+		return errors.New("usage: comwit databases <create|import-dump|list|delete|token>")
 	}
 	switch args[0] {
 	case "create":
@@ -738,6 +739,8 @@ func databases(args []string, stdout io.Writer) error {
 			fmt.Fprintf(stdout, "token\t%s\n", *body.DatabaseToken)
 		}
 		return nil
+	case "import-dump", "import":
+		return databaseImportDumpCommand(args[1:], stdout)
 	case "list":
 		fs := flag.NewFlagSet("databases list", flag.ContinueOnError)
 		project := fs.String("project", "", "project id")
