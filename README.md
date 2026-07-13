@@ -3,6 +3,10 @@
 Command-line client for the **comwit.io** cloud platform — create databases, manage
 apps, and deploy, against `https://api.cloud.comwit.io`.
 
+This repository is the canonical source for the CLI implementation, tests,
+installer, setup action, versioning, and GitHub releases. The public API
+contract and product guides live in `burrr-ai/comwit-cloud`.
+
 ## Install
 
 ```sh
@@ -21,7 +25,7 @@ steps:
   - uses: actions/checkout@v4
   - uses: burrr-ai/comwit-cli@v0
     with:
-      version: v0.1.5 # optional; omit to install the latest release
+      version: v0.1.6 # optional; omit to install the latest release
 
   - run: comwit version
 ```
@@ -40,17 +44,33 @@ comwit projects list
 comwit databases create --project <id> --name <name>
 comwit databases import-dump --project <id> --name <name> --from-dump dump.sql
 comwit databases list --project <id>
+comwit databases execute --project <id> --database <id> --command 'select 1;'
+comwit databases execute --project <id> --database <id> --file ./migration.sql
+comwit databases restore-points list --project <id> --database <id>
+comwit databases restore --project <id> --database <id> --at 2026-07-13T00:00:00Z
+comwit domains ...                   # delegated DNS and records
 comwit apps ...                      # see `comwit --help`
 comwit update                        # self-update to the latest release
 comwit version
 ```
 
+`databases execute` and the PITR commands above are available in v0.1.6 and
+require the matching platform-api deployment.
+
 Get a `cwt_` token from the platform dashboard, or use `comwit login` (device flow).
+SQL execution is remote by default and goes through the project-scoped Comwit
+API; use `--json` for the stable API result envelope. See the
+[full CLI guide](https://github.com/burrr-ai/comwit-cloud/blob/main/docs/guides/cli.md)
+for query limits, PITR, domains, apps, and deploy workflows.
 
 ## Releasing
 
 ```sh
-./release.sh v0.1.0
+GO=/path/to/go ./release.sh v0.1.6
+npm publish
 ```
 
-Builds darwin/linux × amd64/arm64, writes `checksums.txt`, and publishes a GitHub Release.
+`release.sh` builds darwin/linux × amd64/arm64, writes `checksums.txt`, and
+publishes a GitHub Release. `npm publish` uses the same version from
+`package.json`, builds the npm package's six desktop binaries, and requires npm
+registry authentication.

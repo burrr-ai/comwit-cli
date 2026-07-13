@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -490,6 +491,217 @@ func TestDatabasesImportDumpDeletesCreatedDatabaseOnFailure(t *testing.T) {
 	}
 }
 
+func TestDatabasesExecuteCommandPostsProjectQueryAndPrintsRows(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/projects/proj_1/databases/db_1/query" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("auth = %q", got)
+		}
+		var body databaseQueryRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.SQL != "select 1 as ok;" || len(body.Batch) != 0 {
+			t.Fatalf("body = %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"statement":1,"success":true,"columns":[{"name":"ok","decltype":"INTEGER"}],"rows":[[{"type":"integer","value":"1"}]],"affected_row_count":0,"rows_read":1,"rows_written":0,"query_duration_ms":0.125}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{"databases", "execute", "--database", "db_1", "--command", "select 1 as ok"}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"statement 1", "ok", "1", "rows_read\t1", "duration_ms\t0.125"} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("stdout missing %q: %s", expected, stdout.String())
+		}
+	}
+}
+
+func TestDatabasesExecuteFileSendsSQLiteAwareBatchAndPrintsJSONOnly(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "query.sql")
+	if err := os.WriteFile(path, []byte("insert into notes(body) values ('hello; world');\nselect body from notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body databaseQueryRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.SQL != "" || len(body.Batch) != 2 {
+			t.Fatalf("body = %#v", body)
+		}
+		if !strings.Contains(body.Batch[0].SQL, "hello; world") || body.Batch[1].SQL != "select body from notes;" {
+			t.Fatalf("batch = %#v", body.Batch)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"statement":1,"success":true,"columns":[],"rows":[],"affected_row_count":1,"last_insert_rowid":"7","rows_read":0,"rows_written":1,"query_duration_ms":1.5},{"statement":2,"success":true,"columns":[{"name":"body","decltype":"TEXT"}],"rows":[[{"type":"text","value":"hello; world"}]],"affected_row_count":0,"rows_read":1,"rows_written":0,"query_duration_ms":0.5}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{"databases", "execute", "--database", "db_1", "--file", path, "--json", "--remote"}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response databaseQueryResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("stdout is not JSON-only: %v\n%s", err, stdout.String())
+	}
+	if len(response.Results) != 2 || response.Results[0].LastInsertRowID == nil || *response.Results[0].LastInsertRowID != "7" {
+		t.Fatalf("response = %#v", response)
+	}
+	if !strings.Contains(stdout.String(), `"columns": []`) || !strings.Contains(stdout.String(), `"rows": []`) {
+		t.Fatalf("JSON output did not preserve empty success fields: %s", stdout.String())
+	}
+}
+
+func TestDatabasesExecuteReturnsNonZeroForSQLFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"statement":1,"success":false,"error":{"code":"SQL_ERROR","message":"no such table: missing\u001b[31m"}}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{"databases", "execute", "--database", "db_1", "--command", "select * from missing"}, &stdout, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "statement 1 failed: no such table: missing") {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.ContainsRune(err.Error(), '\x1b') || !strings.Contains(err.Error(), `\x1b[31m`) {
+		t.Fatalf("error did not escape terminal control: %q", err.Error())
+	}
+	if !strings.Contains(stdout.String(), "status\tfailed") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+	if strings.ContainsRune(stdout.String(), '\x1b') {
+		t.Fatalf("stdout contains raw terminal control: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	err = run([]string{"databases", "execute", "--database", "db_1", "--command", "select * from missing", "--json"}, &stdout, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected JSON-mode SQL failure")
+	}
+	var envelope struct {
+		Results []map[string]any `json:"results"`
+	}
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &envelope); decodeErr != nil || len(envelope.Results) != 1 {
+		t.Fatalf("JSON failure envelope: decode=%v output=%s", decodeErr, stdout.String())
+	}
+	for _, absent := range []string{"affected_row_count", "rows_read", "rows_written", "query_duration_ms"} {
+		if _, ok := envelope.Results[0][absent]; ok {
+			t.Fatalf("failed result invented %s: %s", absent, stdout.String())
+		}
+	}
+}
+
+func TestSplitSQLForExecutionAllowsTrailingLineCommentWithoutSemicolon(t *testing.T) {
+	statements, err := splitSQLForExecution("select 1 -- trailing comment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statements) != 1 || !strings.Contains(statements[0].SQL, "select 1 -- trailing comment") {
+		t.Fatalf("statements = %#v", statements)
+	}
+}
+
+func TestDatabasesExecuteReturnsNonZeroWhenAPIRollsBackOpenTransaction(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"status":422,"detail":"database query left an open transaction; changes were rolled back"}`))
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{"databases", "execute", "--database", "db_1", "--command", "BEGIN; INSERT INTO notes VALUES (1);"}, &stdout, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 422") || !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("error = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestDatabasesExecuteValidatesInputMode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{
+		{"databases", "execute", "--database", "db_1"},
+		{"databases", "execute", "--database", "db_1", "--command", "select 1", "--file", "query.sql"},
+	} {
+		err := run(args, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--command <sql>|--file <path>") {
+			t.Fatalf("args=%v error=%v", args, err)
+		}
+	}
+
+	err := run([]string{"databases", "execute", "--database", "db_1", "--command", "select 1", "--local"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "remote by default") {
+		t.Fatalf("local error = %v", err)
+	}
+}
+
+func TestLoadExecuteSQLRejectsOversizedFileBeforeParsing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.sql")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), maxExecuteSQLBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadExecuteSQL("", path)
+	if err == nil || !strings.Contains(err.Error(), "request limit") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestPrintableQueryTextEscapesTerminalControls(t *testing.T) {
+	input := "safe\x1b[31mred\x00\x7f\u0085\nnext"
+	got := printableQueryText(input)
+	if strings.ContainsRune(got, '\x1b') || strings.ContainsRune(got, '\x00') || strings.ContainsRune(got, '\x7f') || strings.ContainsRune(got, '\u0085') {
+		t.Fatalf("raw terminal control remained in %q", got)
+	}
+	for _, escaped := range []string{`\x1b`, `\x00`, `\x7f`, `\x85`, `\n`} {
+		if !strings.Contains(got, escaped) {
+			t.Fatalf("output missing %q: %q", escaped, got)
+		}
+	}
+}
+
 func TestUpdateInstallsLatestReleaseAsset(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "comwit")
 	if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {
@@ -660,4 +872,112 @@ func serverURL(r *http.Request) string {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host
+}
+
+func TestDatabasesRestoreFlow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawSelector map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/proj_1/databases/db_1/restore-points":
+			_, _ = w.Write([]byte(`{"restore_points":[{"generation_id":"gen-1","created_at_ms":1000,"base_frame_no":0,"pinned":false,"precise_until_ms":null}],"aliases":[{"alias":"nightly","target_kind":"generation","target_value":"gen-1","created_at_ms":1000}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/proj_1/databases/db_1/restore":
+			var body struct {
+				RestoreTo map[string]any `json:"restore_to"`
+				Name      string         `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			sawSelector = body.RestoreTo
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"operation_id":"op_1","type":"database_restore","status":"pending","resolved_restore_point":"gen-1"},"database":{"database_id":"db_1-pitr-x","name":"before","database_url":"https://db.example.test/v1/db_1-pitr-x","status":"creating"},"database_token":"restored-token"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/proj_1/databases/db_1/operations/op_1":
+			_, _ = w.Write([]byte(`{"operation":{"operation_id":"op_1","type":"database_restore","status":"succeeded","resolved_restore_point":"gen-1"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var pointsOut bytes.Buffer
+	if err := run([]string{"databases", "restore-points", "list", "--database", "db_1"}, &pointsOut, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pointsOut.String(), "gen-1") || !strings.Contains(pointsOut.String(), "up to now") {
+		t.Fatalf("restore-points stdout = %q", pointsOut.String())
+	}
+
+	tokenPath := filepath.Join(dir, "token.txt")
+	var restoreOut bytes.Buffer
+	if err := run([]string{"databases", "restore", "--database", "db_1", "--at", "1500", "--name", "before", "--token-out", tokenPath, "--wait"}, &restoreOut, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if ms, ok := sawSelector["timestamp_ms"]; !ok || ms.(float64) != 1500 {
+		t.Fatalf("selector = %+v", sawSelector)
+	}
+	out := restoreOut.String()
+	for _, want := range []string{"op_1", "db_1-pitr-x", "restored-token", "succeeded"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("restore stdout missing %q: %q", want, out)
+		}
+	}
+	tokenData, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(tokenData)) != "restored-token" {
+		t.Fatalf("token file = %q", string(tokenData))
+	}
+}
+
+func TestWriteTokenOutRestrictsExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token.txt")
+	if err := os.WriteFile(path, []byte("old-token\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTokenOut(path, "new-token"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("token file mode = %04o, want 0600", got)
+	}
+}
+
+func TestDatabasesRestoreRequiresExactlyOneSelector(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COMWIT_API_URL", "http://127.0.0.1:1")
+	err := run([]string{"databases", "restore", "--database", "db_1"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("err = %v, want exactly-one selector error", err)
+	}
+}
+
+func TestDatabasesRestoreRejectsFutureTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COMWIT_API_URL", "http://127.0.0.1:1")
+	future := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	err := run([]string{"databases", "restore", "--database", "db_1", "--at", future}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "future") {
+		t.Fatalf("err = %v, want future timestamp error", err)
+	}
 }

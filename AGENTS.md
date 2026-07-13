@@ -1,12 +1,16 @@
 # AGENTS.md
 
-This repository is the standalone Go CLI for the comwit-cloud platform. Treat it
-as a subproject of `../comwit-cloud`, not as an independent product surface.
+This repository is the canonical implementation and release source for the
+standalone Go CLI for the comwit-cloud platform. Treat the CLI as a product
+surface governed by `../comwit-cloud`, while keeping all CLI source, tests,
+versioning, installers, and release automation in this repository.
 
 ## Product Relationship
 
 - `comwit` is the command-line client for `api.cloud.comwit.io`.
 - The public platform API is owned by `../comwit-cloud/services/platform-api`.
+- CLI implementation and release ownership live here; do not copy CLI source
+  back into `../comwit-cloud` or recreate a second in-tree CLI module there.
 - Product behavior, route shape, auth flows, and user-facing terminology must
   follow the comwit-cloud docs and contracts.
 - Do not invent CLI-only product concepts when the same behavior belongs in the
@@ -24,8 +28,8 @@ context first:
 - `../comwit-cloud/docs/product/`
 
 When a CLI change exposes new or changed platform behavior, update the
-comwit-cloud docs/contracts in the same work, then keep this CLI aligned with
-that documented contract.
+comwit-cloud docs/contracts in the same work, then implement and release the
+CLI from this repository.
 
 ## Adjacent System Boundaries
 
@@ -48,6 +52,9 @@ explicitly asks for a temporary diagnostic tool.
   the CLI.
 - Do not commit tokens, release credentials, generated archives, or local secret
   files.
+- Keep the Go version in `cmd/comwit/main.go` and the npm version in
+  `package.json` identical. Generated npm binaries belong in ignored
+  `npm/dist/`, never in Git.
 
 ## Verification
 
@@ -55,7 +62,8 @@ Use the narrowest verification that matches the change:
 
 ```sh
 go test ./...
+npm test
 ```
 
-For release changes, inspect `release.sh` and verify the generated artifacts
-before publishing a GitHub Release.
+For release changes, inspect `release.sh`, run `npm pack --dry-run`, and verify
+the generated artifacts before publishing the GitHub Release and npm package.

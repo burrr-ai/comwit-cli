@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	version             = "0.1.5"
+	version             = "0.1.6"
 	defaultAPIURL       = "https://api.cloud.comwit.io"
 	defaultGitHubAPIURL = "https://api.github.com"
 	defaultGitHubRepo   = "burrr-ai/comwit-cli"
@@ -323,8 +323,15 @@ func usage(w io.Writer) {
   comwit databases create --project <id> --name <name>
   comwit databases import-dump --project <id> --name <name> --from-dump dump.sql [--keep-failed-db]
   comwit databases list --project <id>
+  comwit databases execute --project <id> --database <id> (--command <sql>|--file <path>) [--json]
   comwit databases delete --project <id> --database <id>
   comwit databases token rotate --project <id> --database <id>
+  comwit databases restore-points list --project <id> --database <id>
+  comwit databases restore --project <id> --database <id> (--at <ts>|--generation <id>|--alias <name>) [--name <n>] [--token-out <path>] [--wait]
+  comwit databases restore status --project <id> --database <id> --operation <op-id> [--wait]
+  comwit databases aliases list --project <id> --database <id>
+  comwit databases aliases set --project <id> --database <id> --alias <name> (--at <ts>|--generation <id>)
+  comwit databases aliases delete --project <id> --database <id> --alias <name>
   comwit domains list --project <id>
   comwit domains add --project <id> --domain example.com
   comwit domains check --project <id> --domain example.com
@@ -707,7 +714,7 @@ func openBrowser(target string) error {
 
 func databases(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: comwit databases <create|import-dump|list|delete|token>")
+		return errors.New("usage: comwit databases <create|import-dump|list|execute|delete|token|restore-points|restore|aliases>")
 	}
 	switch args[0] {
 	case "create":
@@ -762,6 +769,8 @@ func databases(args []string, stdout io.Writer) error {
 		}
 		printDatabases(stdout, body.Databases)
 		return nil
+	case "execute", "query":
+		return databaseExecuteCommand(args[1:], stdout)
 	case "delete":
 		fs := flag.NewFlagSet("databases delete", flag.ContinueOnError)
 		project := fs.String("project", "", "project id")
@@ -781,6 +790,15 @@ func databases(args []string, stdout io.Writer) error {
 		return nil
 	case "token":
 		return databaseTokenCommand(args[1:], stdout)
+	case "restore-points":
+		return databaseRestorePointsCommand(args[1:], stdout)
+	case "restore":
+		if len(args) >= 2 && args[1] == "status" {
+			return databaseRestoreStatusCommand(args[2:], stdout)
+		}
+		return databaseRestoreCommand(args[1:], stdout)
+	case "aliases":
+		return databaseAliasesCommand(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown databases command %q", args[0])
 	}

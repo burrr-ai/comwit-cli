@@ -1,0 +1,39 @@
+{
+  "name": "comwit-cli",
+  "version": "0.1.6",
+  "description": "Comwit Cloud command-line interface.",
+  "keywords": [
+    "comwit",
+    "cloud",
+    "cli",
+    "deploy",
+    "database"
+  ],
+  "license": "UNLICENSED",
+  "homepage": "https://cloud.comwit.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/burrr-ai/comwit-cli.git"
+  },
+  "bin": {
+    "comwit": "./npm/bin/comwit.js",
+    "comwit-cli": "./npm/bin/comwit.js"
+  },
+  "files": [
+    "npm/bin",
+    "npm/dist",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node npm/scripts/verify.mjs",
+    "build:npm": "node npm/scripts/build.mjs",
+    "prepublishOnly": "npm test",
+    "prepack": "npm run build:npm"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
