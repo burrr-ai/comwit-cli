@@ -65,5 +65,8 @@ go test ./...
 npm test
 ```
 
-For release changes, inspect `release.sh`, run `npm pack --dry-run`, and verify
-the generated artifacts before publishing the GitHub Release and npm package.
+For release changes, inspect `release.sh` and `publish-npm.sh`, run
+`npm pack --dry-run`, and verify the generated artifacts. Publish with
+`./release.sh vX.Y.Z`; it owns the synchronized GitHub Release and npm package.
+Use `./publish-npm.sh vX.Y.Z` only to repair a missing npm mirror for an existing
+GitHub release.

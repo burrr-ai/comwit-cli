@@ -24,8 +24,6 @@ Use the setup action to install `comwit` and add it to `PATH` for later steps:
 steps:
   - uses: actions/checkout@v4
   - uses: burrr-ai/comwit-cli@v0
-    with:
-      version: v0.1.6 # optional; omit to install the latest release
 
   - run: comwit version
 ```
@@ -66,11 +64,12 @@ for query limits, PITR, domains, apps, and deploy workflows.
 ## Releasing
 
 ```sh
-GO=/path/to/go ./release.sh v0.1.6
-npm publish
+GO=/path/to/go ./release.sh vX.Y.Z
 ```
 
-`release.sh` builds darwin/linux × amd64/arm64, writes `checksums.txt`, and
-publishes a GitHub Release. `npm publish` uses the same version from
-`package.json`, builds the npm package's six desktop binaries, and requires npm
-registry authentication.
+`release.sh` requires GitHub CLI and npm authentication up front, verifies the
+Go and npm versions, runs the tests, publishes the darwin/linux GitHub assets
+with `checksums.txt`, and publishes the same version to npm. It is safe to rerun
+when the GitHub Release already exists at the current commit or the npm version
+is already published. To repair only a missing npm mirror, run
+`./publish-npm.sh vX.Y.Z`.
