@@ -1,7 +1,7 @@
 # comwit CLI
 
-Command-line client for the **comwit.io** cloud platform — create databases, manage
-apps, and deploy, against `https://api.cloud.comwit.io`.
+Command-line client for the **comwit.io** cloud platform — create databases and
+Storage, manage apps, and deploy, against `https://api.cloud.comwit.io`.
 
 This repository is the canonical source for the CLI implementation, tests,
 installer, setup action, versioning, and GitHub releases. The public API
@@ -46,6 +46,11 @@ comwit databases execute --project <id> --database <id> --command 'select 1;'
 comwit databases execute --project <id> --database <id> --file ./migration.sql
 comwit databases restore-points list --project <id> --database <id>
 comwit databases restore --project <id> --database <id> --at 2026-07-13T00:00:00Z
+comwit storage create --project <id> --name <globally-unique-bucket> --public
+comwit storage list --project <id>
+comwit storage get --project <id> --storage <id>
+comwit storage public enable --project <id> --storage <id>
+comwit storage delete --project <id> --storage <id>
 comwit domains ...                   # delegated DNS and records
 comwit apps ...                      # see `comwit --help`
 comwit update                        # self-update to the latest release
@@ -55,11 +60,14 @@ comwit version
 `databases execute` and the PITR commands above are available in v0.1.6 and
 require the matching platform-api deployment.
 
+Storage lifecycle and public-access commands are available in v0.1.7 and
+require the matching Storage platform-api deployment.
+
 Get a `cwt_` token from the platform dashboard, or use `comwit login` (device flow).
 SQL execution is remote by default and goes through the project-scoped Comwit
 API; use `--json` for the stable API result envelope. See the
 [full CLI guide](https://github.com/burrr-ai/comwit-cloud/blob/main/docs/guides/cli.md)
-for query limits, PITR, domains, apps, and deploy workflows.
+for Storage/S3 setup, query limits, PITR, domains, apps, and deploy workflows.
 
 ## Releasing
 

@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	version             = "0.1.6"
+	version             = "0.1.7"
 	defaultAPIURL       = "https://api.cloud.comwit.io"
 	defaultGitHubAPIURL = "https://api.github.com"
 	defaultGitHubRepo   = "burrr-ai/comwit-cli"
@@ -300,6 +300,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return databases(args[1:], stdout)
 	case "domains":
 		return domainsCommand(args[1:], stdout)
+	case "storage":
+		return storageCommand(args[1:], stdout)
 	case "apps":
 		return apps(args[1:], stdout)
 	case "deploy":
@@ -340,6 +342,11 @@ func usage(w io.Writer) {
   comwit domains records create --project <id> --domain example.com --name www --type CNAME --value target.example.net --ttl 300
   comwit domains records update --project <id> --domain example.com --record <id> --value target2.example.net --ttl 300
   comwit domains records delete --project <id> --domain example.com --record <id>
+  comwit storage create --project <id> --name <bucket-name> [--public] [--location-hint apac]
+  comwit storage list --project <id>
+  comwit storage get --project <id> --storage <id>
+  comwit storage public <enable|disable> --project <id> --storage <id>
+  comwit storage delete --project <id> --storage <id>
   comwit apps list --project <id>
   comwit apps create --project <id> --name <name>
   comwit apps builds --project <id> --app <id>
