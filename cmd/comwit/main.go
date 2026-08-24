@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	version             = "0.1.7"
+	version             = "0.1.8"
 	defaultAPIURL       = "https://api.cloud.comwit.io"
 	defaultGitHubAPIURL = "https://api.github.com"
 	defaultGitHubRepo   = "burrr-ai/comwit-cli"
@@ -48,9 +48,12 @@ type projectsResponse struct {
 }
 
 type appView struct {
-	AppID         string  `json:"app_id"`
-	Name          string  `json:"name"`
-	ActiveBuildID *string `json:"active_build_id"`
+	AppID         string      `json:"app_id"`
+	Name          string      `json:"name"`
+	ActiveBuildID *string     `json:"active_build_id,omitempty"`
+	Builds        []buildView `json:"builds,omitempty"`
+	DefaultDomain string      `json:"default_domain"`
+	DefaultURL    string      `json:"default_url,omitempty"`
 }
 
 type appsResponse struct {
@@ -166,10 +169,18 @@ type dnsRecordResponse struct {
 }
 
 type deployResponse struct {
-	AppID    string   `json:"app_id"`
-	BuildID  string   `json:"build_id"`
-	Hosts    []string `json:"hosts"`
-	Uploaded bool     `json:"uploaded"`
+	AppID      string   `json:"app_id"`
+	BuildID    string   `json:"build_id"`
+	Hosts      []string `json:"hosts"`
+	Uploaded   bool     `json:"uploaded"`
+	DefaultURL string   `json:"default_url,omitempty"`
+}
+
+type appRollbackResponse struct {
+	AppID      string   `json:"app_id"`
+	BuildID    string   `json:"build_id"`
+	Hosts      []string `json:"hosts"`
+	DefaultURL string   `json:"default_url,omitempty"`
 }
 
 type appEnvVar struct {
@@ -349,7 +360,9 @@ func usage(w io.Writer) {
   comwit storage delete --project <id> --storage <id>
   comwit apps list --project <id>
   comwit apps create --project <id> --name <name>
+  comwit apps get --project <id> --app <id>
   comwit apps builds --project <id> --app <id>
+  comwit apps rollback --project <id> --app <id> --build <id>
   comwit apps logs --project <id> --app <id> [--tail 100] [--since 30m] [--level error] [--json] [--follow]
   comwit apps env list --project <id> --app <id>
   comwit apps env set --project <id> --app <id> KEY VALUE
@@ -1088,7 +1101,7 @@ func projects(args []string, stdout io.Writer) error {
 
 func apps(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: comwit apps <list|create|builds|logs|env|domains|delete>")
+		return errors.New("usage: comwit apps <list|create|get|builds|rollback|logs|env|domains|delete>")
 	}
 	switch args[0] {
 	case "list":
@@ -1135,6 +1148,24 @@ func apps(args []string, stdout io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(stdout, "%s\t%s\n", body.App.AppID, body.App.Name)
+		printAppLocations(stdout, body.App)
+		return nil
+	case "get":
+		fs := flag.NewFlagSet("apps get", flag.ContinueOnError)
+		project := fs.String("project", "", "project id")
+		app := fs.String("app", "", "app id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		cfg, projectID, appID, err := appCommandContext(*project, *app)
+		if err != nil {
+			return err
+		}
+		var body appResponse
+		if err := newClient(cfg).getJSON(projectAppPath(projectID, appID), &body); err != nil {
+			return err
+		}
+		printAppDetail(stdout, body.App)
 		return nil
 	case "builds":
 		fs := flag.NewFlagSet("apps builds", flag.ContinueOnError)
@@ -1162,6 +1193,8 @@ func apps(args []string, stdout io.Writer) error {
 		}
 		printBuilds(stdout, body.Builds)
 		return nil
+	case "rollback":
+		return appRollbackCommand(args[1:], stdout)
 	case "logs":
 		return appLogsCommand(args[1:], stdout)
 	case "env":
@@ -1173,6 +1206,38 @@ func apps(args []string, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown apps command %q", args[0])
 	}
+}
+
+func appRollbackCommand(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("apps rollback", flag.ContinueOnError)
+	project := fs.String("project", "", "project id")
+	app := fs.String("app", "", "app id")
+	build := fs.String("build", "", "build id to reactivate")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, projectID, appID, err := appCommandContext(*project, *app)
+	if err != nil {
+		return err
+	}
+	buildID := strings.TrimSpace(*build)
+	if buildID == "" {
+		return errors.New("--build is required")
+	}
+	var body appRollbackResponse
+	if err := newClient(cfg).postJSON(projectAppPath(projectID, appID)+"/rollbacks", map[string]string{
+		"build_id": buildID,
+	}, &body); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "rolled back app=%s build=%s\n", body.AppID, body.BuildID)
+	if len(body.Hosts) > 0 {
+		fmt.Fprintf(stdout, "hosts=%s\n", strings.Join(body.Hosts, ","))
+	}
+	if body.DefaultURL != "" {
+		fmt.Fprintf(stdout, "default_url=%s\n", body.DefaultURL)
+	}
+	return nil
 }
 
 func appLogsCommand(args []string, stdout io.Writer) error {
@@ -1470,7 +1535,7 @@ func deploy(args []string, stdout, stderr io.Writer) error {
 	project := fs.String("project", "", "project id")
 	app := fs.String("app", "", "app id")
 	pkg := fs.String("package", "", "packaged .tar.zst file or brrrd dist directory")
-	host := fs.String("host", "", "domain host to bind; may be repeated as comma-separated list")
+	host := fs.String("host", "", "custom hostname to bind; may be repeated as comma-separated list")
 	envRef := fs.String("env-ref", "", "runtime environment reference")
 	maxConcurrent := fs.Uint("max-concurrent-requests", 0, "runtime max concurrent requests")
 	if err := fs.Parse(args); err != nil {
@@ -1525,6 +1590,9 @@ func deploy(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "deployed app=%s build=%s uploaded=%t\n", body.AppID, body.BuildID, body.Uploaded)
 	if len(body.Hosts) > 0 {
 		fmt.Fprintf(stdout, "hosts=%s\n", strings.Join(body.Hosts, ","))
+	}
+	if body.DefaultURL != "" {
+		fmt.Fprintf(stdout, "default_url=%s\n", body.DefaultURL)
 	}
 	return nil
 }
@@ -2127,13 +2195,31 @@ func printProjects(w io.Writer, projects []projectView) {
 }
 
 func printApps(w io.Writer, apps []appView) {
-	fmt.Fprintln(w, "APP ID\tNAME\tACTIVE BUILD")
+	fmt.Fprintln(w, "APP ID\tNAME\tACTIVE BUILD\tDEFAULT DOMAIN\tDEFAULT URL")
 	for _, app := range apps {
 		active := ""
 		if app.ActiveBuildID != nil {
 			active = *app.ActiveBuildID
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", app.AppID, app.Name, active)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", app.AppID, app.Name, active, app.DefaultDomain, app.DefaultURL)
+	}
+}
+
+func printAppDetail(w io.Writer, app appView) {
+	fmt.Fprintf(w, "app_id\t%s\n", app.AppID)
+	fmt.Fprintf(w, "name\t%s\n", app.Name)
+	if app.ActiveBuildID != nil {
+		fmt.Fprintf(w, "active_build_id\t%s\n", *app.ActiveBuildID)
+	}
+	printAppLocations(w, app)
+}
+
+func printAppLocations(w io.Writer, app appView) {
+	if app.DefaultDomain != "" {
+		fmt.Fprintf(w, "default_domain\t%s\n", app.DefaultDomain)
+	}
+	if app.DefaultURL != "" {
+		fmt.Fprintf(w, "default_url\t%s\n", app.DefaultURL)
 	}
 }
 

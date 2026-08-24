@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -87,6 +88,120 @@ func TestAppsBuildsRequiresApp(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--app is required") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestAppCommandsDisplayPlatformAPIDefaultLocations(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		appID         = "svc_019fe590b65472b0a0d92a45d437bc4b"
+		defaultDomain = "019fe590b65472b0a0d92a45d437bc4b.app.comwit.link"
+		defaultURL    = "https://019fe590b65472b0a0d92a45d437bc4b.app.comwit.link"
+	)
+	appsPath := "/v1/projects/proj_1/apps"
+	appPath := appsPath + "/" + appID
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("auth = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == appsPath:
+			_, _ = w.Write([]byte(`{"apps":[{"app_id":"` + appID + `","name":"web","active_build_id":"bld_live","default_domain":"` + defaultDomain + `","default_url":"` + defaultURL + `"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == appsPath:
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["name"] != "web" {
+				t.Fatalf("create payload = %#v", payload)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"app":{"app_id":"` + appID + `","name":"web","default_domain":"` + defaultDomain + `"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == appPath:
+			_, _ = w.Write([]byte(`{"app":{"app_id":"` + appID + `","name":"web","active_build_id":"bld_live","default_domain":"` + defaultDomain + `","default_url":"` + defaultURL + `"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == appPath+"/rollbacks":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["build_id"] != "bld_old" {
+				t.Fatalf("rollback payload = %#v", payload)
+			}
+			_, _ = w.Write([]byte(`{"app_id":"` + appID + `","build_id":"bld_old","hosts":["example.com"],"default_url":"` + defaultURL + `"}`))
+		case r.Method == http.MethodPost && r.URL.Path == appPath+"/deployments":
+			if got := r.URL.Query().Get("hosts"); got != "" {
+				t.Fatalf("default hostname leaked into custom hosts query: %q", got)
+			}
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != "bundle" {
+				t.Fatalf("deployment body = %q", data)
+			}
+			_, _ = w.Write([]byte(`{"app_id":"` + appID + `","build_id":"bld_new","hosts":[],"uploaded":true,"default_url":"` + defaultURL + `"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	packagePath := filepath.Join(dir, "app.tar.zst")
+	if err := os.WriteFile(packagePath, []byte("bundle"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantDomain bool
+		wantURL    bool
+	}{
+		{name: "list", args: []string{"apps", "list"}, wantDomain: true, wantURL: true},
+		{name: "create", args: []string{"apps", "create", "--name", "web"}, wantDomain: true},
+		{name: "get", args: []string{"apps", "get", "--app", appID}, wantDomain: true, wantURL: true},
+		{name: "rollback", args: []string{"apps", "rollback", "--app", appID, "--build", "bld_old"}, wantURL: true},
+		{name: "deploy", args: []string{"deploy", "--app", appID, "--package", packagePath}, wantURL: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			if err := run(tt.args, &stdout, &bytes.Buffer{}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantDomain && !strings.Contains(stdout.String(), defaultDomain) {
+				t.Fatalf("stdout missing API default domain: %q", stdout.String())
+			}
+			if tt.wantURL && !strings.Contains(stdout.String(), defaultURL) {
+				t.Fatalf("stdout missing API default URL: %q", stdout.String())
+			}
+			if tt.name == "create" && strings.Contains(stdout.String(), "default_url") {
+				t.Fatalf("pre-deploy create printed an unavailable URL: %q", stdout.String())
+			}
+			if tt.name == "rollback" && !strings.Contains(stdout.String(), "hosts=example.com") {
+				t.Fatalf("rollback lost custom hosts output: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestAppsGetAndRollbackValidateRequiredArguments(t *testing.T) {
+	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	if _, err := saveConfig(configFile{Token: "token", DefaultProject: "proj_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"apps", "get"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "--app is required") {
+		t.Fatalf("apps get err = %v", err)
+	}
+	if err := run([]string{"apps", "rollback", "--app", "svc_1"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "--build is required") {
+		t.Fatalf("apps rollback err = %v", err)
 	}
 }
 
