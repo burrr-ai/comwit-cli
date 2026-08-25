@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -75,6 +76,52 @@ func TestStorageCommandsUsePlatformAPI(t *testing.T) {
 		if !strings.Contains(out.String(), "media-bucket") {
 			t.Fatalf("%v output=%q", args, out.String())
 		}
+	}
+}
+
+func TestStorageGetWritesConnectionEnvironment(t *testing.T) {
+	dir := initGitEnvRepo(t)
+	t.Chdir(dir)
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "cwt_test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT=proj_1\nUNRELATED=keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/proj_1/storages/stg_1" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"storage":{"storage_id":"stg_1","project_id":"proj_1","name":"media","bucket":"media","provider":"r2","status":"ready","endpoint":"https://storage.cloud.comwit.io","region":"auto","default_domain":"stg-1.comwit.link","public_access":"enabled","public_domain_status":"active","public_tls_status":"active","public_base_url":"https://stg-1.comwit.link"}}`))
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{"storage", "get", "--storage", "stg_1", "--env-out", ".env"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"UNRELATED=keep",
+		"COMWIT_STORAGE_ID=stg_1",
+		"COMWIT_STORAGE_ENDPOINT=https://storage.cloud.comwit.io",
+		"COMWIT_STORAGE_BUCKET=media",
+		"COMWIT_STORAGE_PUBLIC_BASE_URL=https://stg-1.comwit.link",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("env missing %q: %q", want, text)
+		}
+	}
+	if strings.Contains(text, "COMWIT_CLOUD_TOKEN") {
+		t.Fatalf("storage command wrote token: %q", text)
 	}
 }
 

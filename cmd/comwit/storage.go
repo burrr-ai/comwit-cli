@@ -35,7 +35,7 @@ type storagesResponse struct {
 
 func storageCommand(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: comwit storage <create|list|get|public|delete>")
+		return errors.New("usage: comwit storage <create|list|get|public|cors|delete>")
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
@@ -49,6 +49,8 @@ func storageCommand(args []string, stdout io.Writer) error {
 		return storageGetCommand(args[1:], stdout)
 	case "public":
 		return storagePublicCommand(args[1:], stdout)
+	case "cors":
+		return storageCORSCommand(args[1:], stdout)
 	case "delete":
 		return storageDeleteCommand(args[1:], stdout)
 	default:
@@ -58,10 +60,11 @@ func storageCommand(args []string, stdout io.Writer) error {
 
 func storageUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
-  comwit storage create --project <id> --name <bucket-name> [--public] [--location-hint apac]
+  comwit storage create --project <id> --name <bucket-name> [--public] [--location-hint apac] [--env-out .env]
   comwit storage list --project <id>
-  comwit storage get --project <id> --storage <id>
+  comwit storage get --project <id> --storage <id> [--env-out .env]
   comwit storage public <enable|disable> --project <id> --storage <id>
+  comwit storage cors <get|set|delete>  (pending authoritative API contract)
   comwit storage delete --project <id> --storage <id>`)
 }
 
@@ -71,6 +74,7 @@ func storageCreateCommand(args []string, stdout io.Writer) error {
 	name := fs.String("name", "", "globally unique Storage/bucket name")
 	public := fs.Bool("public", false, "enable the default public domain")
 	location := fs.String("location-hint", "apac", "R2 placement hint")
+	envOut := fs.String("env-out", "", "gitignored .env file to update")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -86,12 +90,23 @@ func storageCreateCommand(args []string, stdout io.Writer) error {
 	if bucket == "" {
 		return errors.New("--name is required")
 	}
+	target, err := prepareEnvOutput(*envOut)
+	if err != nil {
+		return err
+	}
 	payload := map[string]any{"name": bucket, "public": *public, "location_hint": strings.TrimSpace(*location)}
 	var body storageResponse
 	if err := newClient(cfg).postJSON(projectStoragesPath(projectID), payload, &body); err != nil {
 		return err
 	}
 	printStorageDetail(stdout, body.Storage)
+	if target != "" {
+		keys, err := writeStorageEnv(target, body.Storage)
+		if err != nil {
+			return fmt.Errorf("Storage was created but env output failed: %w", err)
+		}
+		printUpdatedEnvKeys(stdout, keys)
+	}
 	return nil
 }
 
@@ -121,7 +136,12 @@ func storageGetCommand(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("storage get", flag.ContinueOnError)
 	project := fs.String("project", "", "project id")
 	storageID := fs.String("storage", "", "Storage id")
+	envOut := fs.String("env-out", "", "gitignored .env file to update")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	target, err := prepareEnvOutput(*envOut)
+	if err != nil {
 		return err
 	}
 	cfg, projectID, id, err := storageCommandContext(*project, *storageID)
@@ -133,7 +153,36 @@ func storageGetCommand(args []string, stdout io.Writer) error {
 		return err
 	}
 	printStorageDetail(stdout, body.Storage)
+	if target != "" {
+		keys, err := writeStorageEnv(target, body.Storage)
+		if err != nil {
+			return err
+		}
+		printUpdatedEnvKeys(stdout, keys)
+	}
 	return nil
+}
+
+type ExternalContractPendingError struct {
+	Feature string
+}
+
+func (err ExternalContractPendingError) Error() string {
+	return fmt.Sprintf("external contract pending: %s is not present in the authoritative Comwit Cloud OpenAPI; no request was sent", err.Feature)
+}
+
+func storageCORSCommand(args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: comwit storage cors <get|set|delete>")
+	}
+	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		fmt.Fprintln(stdout, "Usage: comwit storage cors <get|set|delete> (pending authoritative API contract)")
+		return nil
+	}
+	if args[0] != "get" && args[0] != "set" && args[0] != "delete" {
+		return fmt.Errorf("unknown storage cors command %q", args[0])
+	}
+	return ExternalContractPendingError{Feature: "Storage CORS routes and schema"}
 }
 
 func storagePublicCommand(args []string, stdout io.Writer) error {
@@ -198,6 +247,19 @@ func projectStoragesPath(projectID string) string {
 }
 func projectStoragePath(projectID, storageID string) string {
 	return projectStoragesPath(projectID) + "/" + url.PathEscape(storageID)
+}
+
+func writeStorageEnv(path string, value storageView) ([]string, error) {
+	if strings.TrimSpace(value.StorageID) == "" || strings.TrimSpace(value.Endpoint) == "" || strings.TrimSpace(value.Bucket) == "" {
+		return nil, errors.New("Storage response is missing storage_id, endpoint, or bucket")
+	}
+	return writeEnvUpdates(
+		path,
+		envUpdate{Key: envStorageIDKey, Value: value.StorageID},
+		envUpdate{Key: envStorageEndpointKey, Value: value.Endpoint},
+		envUpdate{Key: envStorageBucketKey, Value: value.Bucket},
+		envUpdate{Key: envStoragePublicURLKey, Value: value.PublicBaseURL},
+	)
 }
 
 func printStorages(w io.Writer, values []storageView) {

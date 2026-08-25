@@ -39,16 +39,18 @@ go install github.com/burrr-ai/comwit-cli/cmd/comwit@latest
 ```sh
 comwit login --token <cwt_token>     # authenticate (token from the dashboard)
 comwit projects list
-comwit databases create --project <id> --name <name>
+comwit auth export-token --env-out .env
+comwit databases create --project <id> --name <name> --env-out .env
+comwit databases configure --database <id> --env-out .env
 comwit databases import-dump --project <id> --name <name> --from-dump dump.sql
 comwit databases list --project <id>
 comwit databases execute --project <id> --database <id> --command 'select 1;'
 comwit databases execute --project <id> --database <id> --file ./migration.sql
 comwit databases restore-points list --project <id> --database <id>
 comwit databases restore --project <id> --database <id> --at 2026-07-13T00:00:00Z
-comwit storage create --project <id> --name <globally-unique-bucket> --public
+comwit storage create --project <id> --name <globally-unique-bucket> --public --env-out .env
 comwit storage list --project <id>
-comwit storage get --project <id> --storage <id>
+comwit storage get --project <id> --storage <id> --env-out .env
 comwit storage public enable --project <id> --storage <id>
 comwit storage delete --project <id> --storage <id>
 comwit domains ...                   # delegated DNS and records
@@ -64,6 +66,23 @@ Storage lifecycle and public-access commands are available in v0.1.7 and
 require the matching Storage platform-api deployment.
 
 Get a `cwt_` token from the platform dashboard, or use `comwit login` (device flow).
+Project-aware commands resolve `--project`, then `COMWIT_PROJECT`, then the
+current directory's gitignored `.env`, then the config default. App-aware
+commands resolve `--app`, then `COMWIT_APP`, then `.env`. Context resolution
+does not read `COMWIT_CLOUD_TOKEN` from `.env`.
+
+`comwit auth export-token --env-out .env` copies the logged-in user `cwt_` into
+`COMWIT_CLOUD_TOKEN` without printing it. Database and Storage `--env-out`
+flags use the same writer for concrete connection values. The writer refuses
+tracked or non-gitignored files, preserves unrelated keys and comments, replaces
+the file atomically, and applies user-only permissions where supported.
+`databases create --env-out` writes only `DATABASE_URL`; it neither prints nor
+persists the legacy one-time `database_token`. The invocation without
+`--env-out` retains the existing one-time token output for compatibility.
+
+Storage CORS commands remain fail-closed until the CORS routes and canonical
+policy schema appear in the authoritative Comwit Cloud OpenAPI; the CLI does
+not call a guessed endpoint.
 SQL execution is remote by default and goes through the project-scoped Comwit
 API; use `--json` for the stable API result envelope. See the
 [full CLI guide](https://github.com/burrr-ai/comwit-cloud/blob/main/docs/guides/cli.md)
