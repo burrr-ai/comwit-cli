@@ -182,7 +182,7 @@ func storageCORSCommand(args []string, stdout io.Writer) error {
 	if args[0] != "get" && args[0] != "set" && args[0] != "delete" {
 		return fmt.Errorf("unknown storage cors command %q", args[0])
 	}
-	return ExternalContractPendingError{Feature: "Storage CORS routes and schema"}
+	return ExternalContractPendingError{Feature: "storage_cors_contract"}
 }
 
 func storagePublicCommand(args []string, stdout io.Writer) error {

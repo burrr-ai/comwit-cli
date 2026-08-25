@@ -284,6 +284,9 @@ func TestStorageCORSPendingDoesNotSendRequest(t *testing.T) {
 	if !errors.As(err, &pending) {
 		t.Fatalf("error = %v", err)
 	}
+	if pending.Feature != "storage_cors_contract" {
+		t.Fatalf("pending feature = %q", pending.Feature)
+	}
 	if requests != 0 {
 		t.Fatalf("pending command sent %d requests", requests)
 	}
