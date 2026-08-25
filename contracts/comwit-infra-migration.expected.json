@@ -1,14 +1,35 @@
 {
-  "contractId": "comwit-infra-migration-expected-v1",
+  "contractId": "comwit-infra-migration-expected-v2",
   "template": {
-    "repository": "https://repo.mvpstar.net/burrr-admin/comwit-template.git",
-    "exactRef": "570d0620dfbe4a1fc2f6b704c2a58ed97c8c0a04"
+    "values": ["mvpstar", "comwit"],
+    "default": "mvpstar"
   },
   "credentials": {
     "mcp": "COMWIT_PAT",
     "runtime": "COMWIT_CLOUD_TOKEN",
-    "deploy": "COMWIT_DEPLOY_TOKEN",
-    "databaseUrl": "DATABASE_URL"
+    "deploy": "COMWIT_DEPLOY_TOKEN"
+  },
+  "resourceBindings": {
+    "mode": "tracked_source",
+    "sourceFile": "src/server/resource-config.ts",
+    "exportName": "comwitResources",
+    "databaseField": "databaseUrl",
+    "storageFields": {
+      "id": "id",
+      "endpoint": "endpoint",
+      "bucket": "bucket",
+      "publicBaseUrl": "publicBaseUrl"
+    },
+    "stagingEnvCleanup": {
+      "after": "verified_source_update",
+      "database": ["DATABASE_URL"],
+      "storage": [
+        "COMWIT_STORAGE_ID",
+        "COMWIT_STORAGE_ENDPOINT",
+        "COMWIT_STORAGE_BUCKET",
+        "COMWIT_STORAGE_PUBLIC_BASE_URL"
+      ]
+    }
   },
   "ports": {
     "userToken": {
@@ -33,25 +54,12 @@
     },
     "cgSessionCreate": {
       "status": "pending_external_contract",
-      "fields": [
-        "projectId",
-        "projectName",
-        "hostingProvider",
-        "templateRepo",
-        "templateRef"
-      ]
+      "requiredFields": ["memberId", "projectName"],
+      "optionalFields": ["template"]
     },
     "cgConfiguration": {
       "status": "pending_external_contract",
-      "environmentKeys": [
-        "COMWIT_PROJECT",
-        "COMWIT_APP",
-        "DATABASE_URL",
-        "COMWIT_STORAGE_ID",
-        "COMWIT_STORAGE_ENDPOINT",
-        "COMWIT_STORAGE_BUCKET",
-        "COMWIT_STORAGE_PUBLIC_BASE_URL"
-      ],
+      "environmentKeys": ["COMWIT_PROJECT", "COMWIT_APP"],
       "secretKeys": ["COMWIT_DEPLOY_TOKEN", "COMWIT_CLOUD_TOKEN"],
       "requiredGuarantees": [
         "idempotent",

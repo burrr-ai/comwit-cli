@@ -65,20 +65,42 @@ require the matching platform-api deployment.
 Storage lifecycle and public-access commands are available in v0.1.7 and
 require the matching Storage platform-api deployment.
 
-Get a `cwt_` token from the platform dashboard, or use `comwit login` (device flow).
+For automated project setup, receive a non-empty `cwt_` token from the trusted
+web action and pass it directly to `comwit login --token <cwt_token>`. This path
+is non-interactive. Automation must reject an empty token and must not fall back
+to bare `comwit login`, because that command starts the user-facing device flow.
 Project-aware commands resolve `--project`, then `COMWIT_PROJECT`, then the
 current directory's gitignored `.env`, then the config default. App-aware
 commands resolve `--app`, then `COMWIT_APP`, then `.env`. Context resolution
 does not read `COMWIT_CLOUD_TOKEN` from `.env`.
 
 `comwit auth export-token --env-out .env` copies the logged-in user `cwt_` into
-`COMWIT_CLOUD_TOKEN` without printing it. Database and Storage `--env-out`
-flags use the same writer for concrete connection values. The writer refuses
-tracked or non-gitignored files, preserves unrelated keys and comments, replaces
-the file atomically, and applies user-only permissions where supported.
-`databases create --env-out` writes only `DATABASE_URL`; it neither prints nor
-persists the legacy one-time `database_token`. The invocation without
-`--env-out` retains the existing one-time token output for compatibility.
+`COMWIT_CLOUD_TOKEN` without printing it. Use that file-writing command instead
+of exporting the credential into the shell or parsing command stdout. Database
+and Storage `--env-out .env` flags use the same protected writer, but their
+non-secret resource values are temporary staging data for a generated
+`comwit-template` project. The writer refuses tracked or non-gitignored files,
+preserves unrelated keys and comments, replaces the file atomically, and
+applies user-only permissions where supported:
+
+- `databases create --env-out .env` stages only `DATABASE_URL`; it neither
+  prints nor persists the legacy one-time `database_token`.
+- `storage create --env-out .env` and `storage get --env-out .env` stage the
+  Storage ID, endpoint, bucket, and optional public base URL.
+- The matching `comwit-template` setup skill reads those exact keys, writes
+  them to the project's tracked `src/server/resource-config.ts`, verifies the
+  result, and only then removes the consumed staging keys from `.env`. It
+  preserves `COMWIT_PROJECT`, `COMWIT_APP`, `COMWIT_CLOUD_TOKEN`, and every
+  unrelated entry. If source writing or verification fails, it leaves the
+  staged values in place so the setup can be retried safely.
+
+Creating the remote resource and writing `.env` are separate steps. If a
+`databases create --env-out .env` invocation creates the database but the local
+write fails, recover with `databases configure --database <id> --env-out .env`
+instead of creating another database. For the equivalent Storage failure, use
+`storage get --project <id> --storage <id> --env-out .env`. An invocation
+without `--env-out` retains the existing one-time database token output for
+compatibility; automated setup must not scrape that output.
 
 Storage CORS commands remain fail-closed until the CORS routes and canonical
 policy schema appear in the authoritative Comwit Cloud OpenAPI; the CLI does
