@@ -24,9 +24,8 @@ const hasExactItems = (actual, expected) =>
   actual.every((item, index) => item === expected[index]);
 
 if (
-  expectedContract.contractId !== "comwit-infra-migration-expected-v3" ||
-  !hasExactItems(expectedContract.template?.values, ["mvpstar", "comwit"]) ||
-  expectedContract.template?.default !== "mvpstar" ||
+  expectedContract.contractId !== "comwit-infra-migration-expected-v4" ||
+  expectedContract.template !== undefined ||
   Object.keys(expectedContract.credentials ?? {}).length !== 3 ||
   expectedContract.credentials?.mcp !== "COMWIT_PAT" ||
   expectedContract.credentials?.runtime !== "COMWIT_CLOUD_TOKEN" ||
@@ -42,13 +41,16 @@ if (
   expectedContract.localUserAuthentication?.serverTokenIssue !== false ||
   expectedContract.localUserAuthentication?.serverTokenRevoke !== false ||
   expectedContract.ports?.userToken !== undefined ||
-  !hasExactItems(expectedContract.ports?.cgSessionCreate?.requiredFields, [
-    "memberId",
-    "projectName",
-  ]) ||
-  !hasExactItems(expectedContract.ports?.cgSessionCreate?.optionalFields, [
-    "template",
-  ]) ||
+  expectedContract.ports?.cgComwitSessionCreate?.dedicatedEndpoint !== true ||
+  expectedContract.ports?.cgComwitSessionCreate?.path !== null ||
+  expectedContract.ports?.cgComwitSessionCreate?.requestFields !== null ||
+  expectedContract.ports?.cgComwitSessionCreate?.responseFields !== null ||
+  !hasExactItems(
+    expectedContract.ports?.cgComwitSessionCreate?.forbiddenRequestFields,
+    ["template", "hostingProvider", "templateRepo", "templateRef"],
+  ) ||
+  expectedContract.stableExternalContracts?.cgLegacySessionCreatePath !==
+    "/session" ||
   !hasExactItems(expectedContract.ports?.cgConfiguration?.environmentKeys, [
     "COMWIT_PROJECT",
     "COMWIT_APP",

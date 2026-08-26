@@ -1,9 +1,5 @@
 {
-  "contractId": "comwit-infra-migration-expected-v3",
-  "template": {
-    "values": ["mvpstar", "comwit"],
-    "default": "mvpstar"
-  },
+  "contractId": "comwit-infra-migration-expected-v4",
   "credentials": {
     "mcp": "COMWIT_PAT",
     "runtime": "COMWIT_CLOUD_TOKEN",
@@ -54,10 +50,18 @@
       ],
       "runtimeScopeNames": null
     },
-    "cgSessionCreate": {
+    "cgComwitSessionCreate": {
       "status": "pending_external_contract",
-      "requiredFields": ["memberId", "projectName"],
-      "optionalFields": ["template"]
+      "dedicatedEndpoint": true,
+      "path": null,
+      "requestFields": null,
+      "responseFields": null,
+      "forbiddenRequestFields": [
+        "template",
+        "hostingProvider",
+        "templateRepo",
+        "templateRef"
+      ]
     },
     "cgConfiguration": {
       "status": "pending_external_contract",
@@ -92,12 +96,13 @@
   },
   "stableExternalContracts": {
     "appFields": ["app_id", "name", "default_url", "default_domain"],
-    "storagePresignPath": "/v1/projects/{projectId}/storages/{storageId}/presigned-urls"
+    "storagePresignPath": "/v1/projects/{projectId}/storages/{storageId}/presigned-urls",
+    "cgLegacySessionCreatePath": "/session"
   },
   "pendingErrorCodes": [
     "comwit_cloud_project_token_scopes",
     "comwit_cloud_project_token_revoke",
-    "cg_template_selection",
+    "cg_comwit_session_create",
     "cg_environment_secret_upsert",
     "database_comwit_token_auth",
     "storage_cors_contract",
