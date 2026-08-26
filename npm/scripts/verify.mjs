@@ -24,7 +24,7 @@ const hasExactItems = (actual, expected) =>
   actual.every((item, index) => item === expected[index]);
 
 if (
-  expectedContract.contractId !== "comwit-infra-migration-expected-v4" ||
+  expectedContract.contractId !== "comwit-infra-migration-expected-v5" ||
   expectedContract.template !== undefined ||
   Object.keys(expectedContract.credentials ?? {}).length !== 3 ||
   expectedContract.credentials?.mcp !== "COMWIT_PAT" ||
@@ -41,16 +41,40 @@ if (
   expectedContract.localUserAuthentication?.serverTokenIssue !== false ||
   expectedContract.localUserAuthentication?.serverTokenRevoke !== false ||
   expectedContract.ports?.userToken !== undefined ||
-  expectedContract.ports?.cgComwitSessionCreate?.dedicatedEndpoint !== true ||
-  expectedContract.ports?.cgComwitSessionCreate?.path !== null ||
-  expectedContract.ports?.cgComwitSessionCreate?.requestFields !== null ||
-  expectedContract.ports?.cgComwitSessionCreate?.responseFields !== null ||
+  expectedContract.ports?.cgRouting?.status !==
+    "pending_comwit_base_url" ||
+  expectedContract.ports?.cgRouting?.legacyBaseUrl !==
+    "https://cg.mvpstar.net" ||
+  expectedContract.ports?.cgRouting?.comwitBaseUrl !== null ||
+  expectedContract.ports?.cgRouting?.routingKey !==
+    "persisted_session_backend" ||
+  expectedContract.ports?.cgRouting?.apiSurface !== "same_as_legacy" ||
+  expectedContract.ports?.cgRouting?.sessionCreatePath !== "/session" ||
+  !hasExactItems(expectedContract.ports?.cgRouting?.requestFields, [
+    "memberId",
+    "projectName",
+  ]) ||
+  expectedContract.ports?.cgRouting?.responseEnvelope !== "session" ||
+  expectedContract.ports?.cgRouting?.serverDefaultTemplate !== "comwit" ||
+  expectedContract.ports?.cgRouting?.authContract !== null ||
+  !hasExactItems(expectedContract.ports?.cgRouting?.requiredPathFamilies, [
+    "session",
+    "deployment",
+    "env",
+    "usage",
+    "message",
+    "stream",
+    "command",
+  ]) ||
   !hasExactItems(
-    expectedContract.ports?.cgComwitSessionCreate?.forbiddenRequestFields,
+    expectedContract.ports?.cgRouting?.forbiddenRequestFields,
     ["template", "hostingProvider", "templateRepo", "templateRef"],
   ) ||
-  expectedContract.stableExternalContracts?.cgLegacySessionCreatePath !==
-    "/session" ||
+  expectedContract.ports?.cgConfiguration?.status !==
+    "pending_comwit_base_url" ||
+  expectedContract.ports?.cgConfiguration?.path !==
+    "/session/{sessionId}/env" ||
+  expectedContract.ports?.cgConfiguration?.apiSurface !== "same_as_legacy" ||
   !hasExactItems(expectedContract.ports?.cgConfiguration?.environmentKeys, [
     "COMWIT_PROJECT",
     "COMWIT_APP",
@@ -80,7 +104,9 @@ if (
   expectedContract.ports?.projectToken?.runtimeScopeNames !== null ||
   expectedContract.pendingErrorCodes?.includes("storage_cors_contract") !== true ||
   expectedContract.pendingErrorCodes?.includes("comwit_cloud_user_token_issue") ||
-  expectedContract.pendingErrorCodes?.includes("comwit_cloud_user_token_revoke")
+  expectedContract.pendingErrorCodes?.includes("comwit_cloud_user_token_revoke") ||
+  expectedContract.pendingErrorCodes?.includes("cg_comwit_session_create") ||
+  expectedContract.pendingErrorCodes?.includes("cg_environment_secret_upsert")
 ) {
   throw new Error("Comwit infrastructure expected contract fixture is invalid");
 }

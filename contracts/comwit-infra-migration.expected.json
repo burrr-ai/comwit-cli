@@ -1,5 +1,5 @@
 {
-  "contractId": "comwit-infra-migration-expected-v4",
+  "contractId": "comwit-infra-migration-expected-v5",
   "credentials": {
     "mcp": "COMWIT_PAT",
     "runtime": "COMWIT_CLOUD_TOKEN",
@@ -50,12 +50,26 @@
       ],
       "runtimeScopeNames": null
     },
-    "cgComwitSessionCreate": {
-      "status": "pending_external_contract",
-      "dedicatedEndpoint": true,
-      "path": null,
-      "requestFields": null,
-      "responseFields": null,
+    "cgRouting": {
+      "status": "pending_comwit_base_url",
+      "legacyBaseUrl": "https://cg.mvpstar.net",
+      "comwitBaseUrl": null,
+      "routingKey": "persisted_session_backend",
+      "apiSurface": "same_as_legacy",
+      "sessionCreatePath": "/session",
+      "requestFields": ["memberId", "projectName"],
+      "responseEnvelope": "session",
+      "serverDefaultTemplate": "comwit",
+      "authContract": null,
+      "requiredPathFamilies": [
+        "session",
+        "deployment",
+        "env",
+        "usage",
+        "message",
+        "stream",
+        "command"
+      ],
       "forbiddenRequestFields": [
         "template",
         "hostingProvider",
@@ -64,7 +78,9 @@
       ]
     },
     "cgConfiguration": {
-      "status": "pending_external_contract",
+      "status": "pending_comwit_base_url",
+      "path": "/session/{sessionId}/env",
+      "apiSurface": "same_as_legacy",
       "environmentKeys": ["COMWIT_PROJECT", "COMWIT_APP"],
       "secretKeys": ["COMWIT_DEPLOY_TOKEN", "COMWIT_CLOUD_TOKEN"],
       "requiredGuarantees": [
@@ -96,14 +112,12 @@
   },
   "stableExternalContracts": {
     "appFields": ["app_id", "name", "default_url", "default_domain"],
-    "storagePresignPath": "/v1/projects/{projectId}/storages/{storageId}/presigned-urls",
-    "cgLegacySessionCreatePath": "/session"
+    "storagePresignPath": "/v1/projects/{projectId}/storages/{storageId}/presigned-urls"
   },
   "pendingErrorCodes": [
     "comwit_cloud_project_token_scopes",
     "comwit_cloud_project_token_revoke",
-    "cg_comwit_session_create",
-    "cg_environment_secret_upsert",
+    "cg_comwit_base_url",
     "database_comwit_token_auth",
     "storage_cors_contract",
     "storage_comwit_token_auth",
