@@ -37,7 +37,7 @@ go install github.com/burrr-ai/comwit-cli/cmd/comwit@latest
 ## Usage
 
 ```sh
-comwit login --token <cwt_token>     # authenticate (token from the dashboard)
+comwit login                         # authenticate through browser device approval
 comwit projects list
 comwit auth export-token --env-out .env
 comwit databases create --project <id> --name <name> --env-out .env
@@ -65,10 +65,16 @@ require the matching platform-api deployment.
 Storage lifecycle and public-access commands are available in v0.1.7 and
 require the matching Storage platform-api deployment.
 
-For automated project setup, receive a non-empty `cwt_` token from the trusted
-web action and pass it directly to `comwit login --token <cwt_token>`. This path
-is non-interactive. Automation must reject an empty token and must not fall back
-to bare `comwit login`, because that command starts the user-facing device flow.
+For project handoff, intentionally run `comwit login`. The command opens the
+Comwit Cloud device-authorization page, shows the one-time approval code, and
+waits while the user approves the connection. Treat the handoff as incomplete
+until `comwit login` reports success and a following `comwit projects list`
+also succeeds. The CLI stores the returned `cwt_` itself and never prints that
+token, so the user must not be asked to copy or paste it into chat or a shell.
+If the browser does not open automatically, use the verification URL and code
+printed by the command. A denied, expired, timed-out, or failed request must be
+reported and retried with a new `comwit login`; do not invent or request a
+replacement token.
 Project-aware commands resolve `--project`, then `COMWIT_PROJECT`, then the
 current directory's gitignored `.env`, then the config default. App-aware
 commands resolve `--app`, then `COMWIT_APP`, then `.env`. Context resolution

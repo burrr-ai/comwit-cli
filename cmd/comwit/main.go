@@ -671,7 +671,7 @@ func authCommand(args []string, stdout io.Writer) error {
 	}
 	token := strings.TrimSpace(cfg.Token)
 	if token == "" {
-		return errors.New("not logged in; run `comwit login --token <cwt_token>`")
+		return errors.New("not logged in; run `comwit login`")
 	}
 	if !strings.HasPrefix(token, "cwt_") {
 		return errors.New("auth export-token requires a logged-in user cwt_ token")
@@ -737,7 +737,11 @@ func runDeviceLogin(
 		}
 		switch poll.Status {
 		case "token":
-			cfg := configFile{Token: poll.Token, DefaultProject: project}
+			token := strings.TrimSpace(poll.Token)
+			if !strings.HasPrefix(token, "cwt_") || len(token) <= len("cwt_") {
+				return errors.New("device login returned an invalid user token")
+			}
+			cfg := configFile{Token: token, DefaultProject: project}
 			path, err := saveConfig(cfg)
 			if err != nil {
 				return err
@@ -1737,7 +1741,7 @@ func (c *client) postPublic(path string, payload any, out any) error {
 
 func (c *client) do(method, path string, body []byte, contentType string, out any) error {
 	if strings.TrimSpace(c.token) == "" {
-		return errors.New("not logged in; run `comwit login --token <token>`")
+		return errors.New("not logged in; run `comwit login`")
 	}
 	req, err := http.NewRequest(method, c.apiURL+path, bytes.NewReader(body))
 	if err != nil {

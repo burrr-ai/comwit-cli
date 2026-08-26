@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -406,6 +407,43 @@ func TestDeviceLoginRemainsAvailableAndDoesNotEchoToken(t *testing.T) {
 	}
 	if cfg.Token != token || cfg.DefaultProject != "proj_device" {
 		t.Fatalf("config = %+v", cfg)
+	}
+}
+
+func TestDeviceLoginRejectsInvalidUserToken(t *testing.T) {
+	for _, token := range []string{"", "cwp_project_token"} {
+		t.Run(token, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			t.Setenv("COMWIT_CONFIG", configPath)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/auth/device":
+					_, _ = w.Write([]byte(`{"device_code":"device-1","user_code":"ABCD","verification_uri":"https://cloud.example.test/device","interval":1,"expires_in":60}`))
+				case "/v1/auth/device/token":
+					_, _ = fmt.Fprintf(w, `{"status":"token","token":%q}`, token)
+				default:
+					t.Fatalf("path = %q", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			err := runDeviceLogin(
+				&bytes.Buffer{},
+				"",
+				&client{apiURL: server.URL, httpClient: server.Client()},
+				func(string) error { return nil },
+				func(time.Duration) {},
+				time.Now,
+			)
+			if err == nil || !strings.Contains(err.Error(), "invalid user token") {
+				t.Fatalf("error = %v", err)
+			}
+			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+				t.Fatalf("device login wrote config for invalid token: %v", err)
+			}
+		})
 	}
 }
 

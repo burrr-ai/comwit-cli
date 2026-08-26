@@ -24,13 +24,24 @@ const hasExactItems = (actual, expected) =>
   actual.every((item, index) => item === expected[index]);
 
 if (
-  expectedContract.contractId !== "comwit-infra-migration-expected-v2" ||
+  expectedContract.contractId !== "comwit-infra-migration-expected-v3" ||
   !hasExactItems(expectedContract.template?.values, ["mvpstar", "comwit"]) ||
   expectedContract.template?.default !== "mvpstar" ||
   Object.keys(expectedContract.credentials ?? {}).length !== 3 ||
   expectedContract.credentials?.mcp !== "COMWIT_PAT" ||
   expectedContract.credentials?.runtime !== "COMWIT_CLOUD_TOKEN" ||
   expectedContract.credentials?.deploy !== "COMWIT_DEPLOY_TOKEN" ||
+  expectedContract.localUserAuthentication?.method !== "device_flow" ||
+  expectedContract.localUserAuthentication?.startCommand !== "comwit login" ||
+  expectedContract.localUserAuthentication?.verificationCommand !==
+    "comwit projects list" ||
+  expectedContract.localUserAuthentication?.deviceStartPath !==
+    "/v1/auth/device" ||
+  expectedContract.localUserAuthentication?.devicePollPath !==
+    "/v1/auth/device/token" ||
+  expectedContract.localUserAuthentication?.serverTokenIssue !== false ||
+  expectedContract.localUserAuthentication?.serverTokenRevoke !== false ||
+  expectedContract.ports?.userToken !== undefined ||
   !hasExactItems(expectedContract.ports?.cgSessionCreate?.requiredFields, [
     "memberId",
     "projectName",
@@ -65,7 +76,9 @@ if (
     "COMWIT_STORAGE_PUBLIC_BASE_URL",
   ]) ||
   expectedContract.ports?.projectToken?.runtimeScopeNames !== null ||
-  expectedContract.pendingErrorCodes?.includes("storage_cors_contract") !== true
+  expectedContract.pendingErrorCodes?.includes("storage_cors_contract") !== true ||
+  expectedContract.pendingErrorCodes?.includes("comwit_cloud_user_token_issue") ||
+  expectedContract.pendingErrorCodes?.includes("comwit_cloud_user_token_revoke")
 ) {
   throw new Error("Comwit infrastructure expected contract fixture is invalid");
 }

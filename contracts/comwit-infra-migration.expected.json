@@ -1,5 +1,5 @@
 {
-  "contractId": "comwit-infra-migration-expected-v2",
+  "contractId": "comwit-infra-migration-expected-v3",
   "template": {
     "values": ["mvpstar", "comwit"],
     "default": "mvpstar"
@@ -8,6 +8,15 @@
     "mcp": "COMWIT_PAT",
     "runtime": "COMWIT_CLOUD_TOKEN",
     "deploy": "COMWIT_DEPLOY_TOKEN"
+  },
+  "localUserAuthentication": {
+    "method": "device_flow",
+    "startCommand": "comwit login",
+    "verificationCommand": "comwit projects list",
+    "deviceStartPath": "/v1/auth/device",
+    "devicePollPath": "/v1/auth/device/token",
+    "serverTokenIssue": false,
+    "serverTokenRevoke": false
   },
   "resourceBindings": {
     "mode": "tracked_source",
@@ -32,13 +41,6 @@
     }
   },
   "ports": {
-    "userToken": {
-      "status": "pending_external_contract",
-      "issueInput": ["userId"],
-      "issueOutput": ["tokenId", "token"],
-      "revokeInput": ["userId", "tokenId"],
-      "httpRoute": null
-    },
     "projectToken": {
       "status": "pending_runtime_scope_and_idempotency_contract",
       "purposes": ["deploy", "runtime"],
@@ -93,8 +95,6 @@
     "storagePresignPath": "/v1/projects/{projectId}/storages/{storageId}/presigned-urls"
   },
   "pendingErrorCodes": [
-    "comwit_cloud_user_token_issue",
-    "comwit_cloud_user_token_revoke",
     "comwit_cloud_project_token_scopes",
     "comwit_cloud_project_token_revoke",
     "cg_template_selection",
