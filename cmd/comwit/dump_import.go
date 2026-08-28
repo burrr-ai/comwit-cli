@@ -124,7 +124,10 @@ func databaseImportDumpCommand(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	projectID := selectProject(*project, cfg)
+	projectID, err := selectProject(*project, cfg)
+	if err != nil {
+		return err
+	}
 	if projectID == "" {
 		return errors.New("--project is required")
 	}

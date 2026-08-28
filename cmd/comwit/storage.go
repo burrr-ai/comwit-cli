@@ -58,27 +58,35 @@ func storageCommand(args []string, stdout io.Writer) error {
 
 func storageUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
-  comwit storage create --project <id> --name <bucket-name> [--public] [--location-hint apac]
+  comwit storage create --project <id> --name <bucket-name> [--public] [--location-hint apac] [--env-out .env]
   comwit storage list --project <id>
-  comwit storage get --project <id> --storage <id>
+  comwit storage get --project <id> [--storage <id>] [--env-out .env]
   comwit storage public <enable|disable> --project <id> --storage <id>
   comwit storage delete --project <id> --storage <id>`)
 }
 
 func storageCreateCommand(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("storage create", flag.ContinueOnError)
+	fs.SetOutput(stdout)
 	project := fs.String("project", "", "project id")
 	name := fs.String("name", "", "globally unique Storage/bucket name")
 	public := fs.Bool("public", false, "enable the default public domain")
 	location := fs.String("location-hint", "apac", "R2 placement hint")
+	envOut := fs.String("env-out", "", "gitignored .env file to atomically update (keys: COMWIT_STORAGE_ID,COMWIT_STORAGE_ENDPOINT,COMWIT_STORAGE_BUCKET,COMWIT_STORAGE_PUBLIC_BASE_URL)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	projectID := selectProject(*project, cfg)
+	projectID, err := selectProject(*project, cfg)
+	if err != nil {
+		return err
+	}
 	if projectID == "" {
 		return errors.New("--project is required")
 	}
@@ -86,12 +94,23 @@ func storageCreateCommand(args []string, stdout io.Writer) error {
 	if bucket == "" {
 		return errors.New("--name is required")
 	}
+	target, err := prepareEnvOutput(*envOut)
+	if err != nil {
+		return err
+	}
 	payload := map[string]any{"name": bucket, "public": *public, "location_hint": strings.TrimSpace(*location)}
 	var body storageResponse
 	if err := newClient(cfg).postJSON(projectStoragesPath(projectID), payload, &body); err != nil {
 		return err
 	}
 	printStorageDetail(stdout, body.Storage)
+	if target != "" {
+		keys, err := writeStorageEnv(target, body.Storage)
+		if err != nil {
+			return fmt.Errorf("Storage was created but env output failed: %w", err)
+		}
+		printUpdatedEnvKeys(stdout, keys)
+	}
 	return nil
 }
 
@@ -105,7 +124,10 @@ func storageListCommand(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	projectID := selectProject(*project, cfg)
+	projectID, err := selectProject(*project, cfg)
+	if err != nil {
+		return err
+	}
 	if projectID == "" {
 		return errors.New("--project is required")
 	}
@@ -119,12 +141,26 @@ func storageListCommand(args []string, stdout io.Writer) error {
 
 func storageGetCommand(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("storage get", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	fs.Usage = func() {
+		fmt.Fprintln(stdout, "Usage of storage get:")
+		fmt.Fprintln(stdout, "resource-id-source: explicit,cwd-env")
+		fs.PrintDefaults()
+	}
 	project := fs.String("project", "", "project id")
-	storageID := fs.String("storage", "", "Storage id")
+	storageID := fs.String("storage", "", "Storage id; defaults to COMWIT_STORAGE_ID in safe cwd .env")
+	envOut := fs.String("env-out", "", "gitignored .env file to atomically update (keys: COMWIT_STORAGE_ID,COMWIT_STORAGE_ENDPOINT,COMWIT_STORAGE_BUCKET,COMWIT_STORAGE_PUBLIC_BASE_URL)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
-	cfg, projectID, id, err := storageCommandContext(*project, *storageID)
+	target, err := prepareEnvOutput(*envOut)
+	if err != nil {
+		return err
+	}
+	cfg, projectID, id, err := storageGetCommandContext(*project, *storageID)
 	if err != nil {
 		return err
 	}
@@ -133,6 +169,13 @@ func storageGetCommand(args []string, stdout io.Writer) error {
 		return err
 	}
 	printStorageDetail(stdout, body.Storage)
+	if target != "" {
+		keys, err := writeStorageEnv(target, body.Storage)
+		if err != nil {
+			return err
+		}
+		printUpdatedEnvKeys(stdout, keys)
+	}
 	return nil
 }
 
@@ -183,7 +226,10 @@ func storageCommandContext(project, id string) (configFile, string, string, erro
 	if err != nil {
 		return configFile{}, "", "", err
 	}
-	projectID := selectProject(project, cfg)
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if projectID == "" {
 		return configFile{}, "", "", errors.New("--project is required")
 	}
@@ -193,11 +239,46 @@ func storageCommandContext(project, id string) (configFile, string, string, erro
 	}
 	return cfg, projectID, storageID, nil
 }
+
+func storageGetCommandContext(project, id string) (configFile, string, string, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return configFile{}, "", "", err
+	}
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
+	if projectID == "" {
+		return configFile{}, "", "", errors.New("--project is required")
+	}
+	storageID, err := selectStoredResourceIdentifier(id, envStorageIDKey)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
+	if storageID == "" {
+		return configFile{}, "", "", errors.New("--storage is required (or set COMWIT_STORAGE_ID in safe cwd gitignored .env)")
+	}
+	return cfg, projectID, storageID, nil
+}
 func projectStoragesPath(projectID string) string {
 	return "/v1/projects/" + url.PathEscape(projectID) + "/storages"
 }
 func projectStoragePath(projectID, storageID string) string {
 	return projectStoragesPath(projectID) + "/" + url.PathEscape(storageID)
+}
+
+func writeStorageEnv(path string, value storageView) ([]string, error) {
+	if strings.TrimSpace(value.StorageID) == "" || strings.TrimSpace(value.Endpoint) == "" || strings.TrimSpace(value.Bucket) == "" {
+		return nil, errors.New("Storage response is missing storage_id, endpoint, or bucket")
+	}
+	return writeEnvUpdates(
+		path,
+		envUpdate{Key: envStorageIDKey, Value: value.StorageID},
+		envUpdate{Key: envStorageEndpointKey, Value: value.Endpoint},
+		envUpdate{Key: envStorageBucketKey, Value: value.Bucket},
+		envUpdate{Key: envStoragePublicURLKey, Value: value.PublicBaseURL},
+	)
 }
 
 func printStorages(w io.Writer, values []storageView) {

@@ -294,6 +294,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "login":
 		return login(args[1:], stdout)
+	case "auth":
+		return authCommand(args[1:], stdout)
 	case "projects":
 		return projects(args[1:], stdout)
 	case "databases":
@@ -321,8 +323,10 @@ func usage(w io.Writer) {
   comwit version
   comwit login [--project <id>]               (browser device login)
   comwit login --token <token> [--project <id>]
+  comwit auth export-token --env-out .env
   comwit projects list
-  comwit databases create --project <id> --name <name>
+  comwit databases create --project <id> --name <name> [--env-out .env]
+  comwit databases configure --project <id> [--database <id>] --env-out .env
   comwit databases import-dump --project <id> --name <name> --from-dump dump.sql [--keep-failed-db]
   comwit databases list --project <id>
   comwit databases execute --project <id> --database <id> (--command <sql>|--file <path>) [--json]
@@ -342,9 +346,9 @@ func usage(w io.Writer) {
   comwit domains records create --project <id> --domain example.com --name www --type CNAME --value target.example.net --ttl 300
   comwit domains records update --project <id> --domain example.com --record <id> --value target2.example.net --ttl 300
   comwit domains records delete --project <id> --domain example.com --record <id>
-  comwit storage create --project <id> --name <bucket-name> [--public] [--location-hint apac]
+  comwit storage create --project <id> --name <bucket-name> [--public] [--location-hint apac] [--env-out .env]
   comwit storage list --project <id>
-  comwit storage get --project <id> --storage <id>
+  comwit storage get --project <id> [--storage <id>] [--env-out .env]
   comwit storage public <enable|disable> --project <id> --storage <id>
   comwit storage delete --project <id> --storage <id>
   comwit apps list --project <id>
@@ -365,6 +369,7 @@ func usage(w io.Writer) {
 Environment:
   COMWIT_CONFIG   Override config file path.
   COMWIT_PROJECT  Default project id for commands that accept --project.
+  COMWIT_APP      Default App id for commands that accept --app.
   COMWIT_API_URL  Override API URL for local testing.`)
 }
 
@@ -644,6 +649,41 @@ func login(args []string, stdout io.Writer) error {
 	return nil
 }
 
+func authCommand(args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] != "export-token" {
+		return errors.New("usage: comwit auth export-token --env-out .env")
+	}
+	fs := flag.NewFlagSet("auth export-token", flag.ContinueOnError)
+	envOut := fs.String("env-out", "", "gitignored .env file to update")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*envOut) == "" {
+		return errors.New("usage: comwit auth export-token --env-out .env")
+	}
+	target, err := prepareEnvOutput(*envOut)
+	if err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	token := strings.TrimSpace(cfg.Token)
+	if token == "" {
+		return errors.New("not logged in; run `comwit login`")
+	}
+	if !strings.HasPrefix(token, "cwt_") {
+		return errors.New("auth export-token requires a logged-in user cwt_ token")
+	}
+	keys, err := writeEnvUpdates(target, envUpdate{Key: envCloudTokenKey, Value: token})
+	if err != nil {
+		return err
+	}
+	printUpdatedEnvKeys(stdout, keys)
+	return nil
+}
+
 type deviceStartResponse struct {
 	DeviceCode      string `json:"device_code"`
 	UserCode        string `json:"user_code"`
@@ -659,14 +699,24 @@ type devicePollResponse struct {
 
 func deviceLogin(stdout io.Writer, project string) error {
 	c := &client{apiURL: apiURL(), httpClient: &http.Client{Timeout: 30 * time.Second}}
+	return runDeviceLogin(stdout, project, c, openBrowser, time.Sleep, time.Now)
+}
 
+func runDeviceLogin(
+	stdout io.Writer,
+	project string,
+	c *client,
+	open func(string) error,
+	sleep func(time.Duration),
+	now func() time.Time,
+) error {
 	var start deviceStartResponse
 	if err := c.postPublic("/v1/auth/device", nil, &start); err != nil {
 		return err
 	}
 
 	fmt.Fprintf(stdout, "To authorize the comwit CLI, open:\n\n  %s\n\nand enter the code: %s\n\n", start.VerificationURI, start.UserCode)
-	_ = openBrowser(start.VerificationURI)
+	_ = open(start.VerificationURI)
 
 	interval := start.Interval
 	if interval <= 0 {
@@ -676,18 +726,22 @@ func deviceLogin(stdout io.Writer, project string) error {
 	if expires <= 0 {
 		expires = 600
 	}
-	deadline := time.Now().Add(time.Duration(expires) * time.Second)
+	deadline := now().Add(time.Duration(expires) * time.Second)
 	fmt.Fprintln(stdout, "Waiting for approval...")
 
-	for time.Now().Before(deadline) {
-		time.Sleep(time.Duration(interval) * time.Second)
+	for now().Before(deadline) {
+		sleep(time.Duration(interval) * time.Second)
 		var poll devicePollResponse
 		if err := c.postPublic("/v1/auth/device/token", map[string]string{"device_code": start.DeviceCode}, &poll); err != nil {
 			return err
 		}
 		switch poll.Status {
 		case "token":
-			cfg := configFile{Token: poll.Token, DefaultProject: project}
+			token := strings.TrimSpace(poll.Token)
+			if !strings.HasPrefix(token, "cwt_") || len(token) <= len("cwt_") {
+				return errors.New("device login returned an invalid user token")
+			}
+			cfg := configFile{Token: token, DefaultProject: project}
 			path, err := saveConfig(cfg)
 			if err != nil {
 				return err
@@ -721,26 +775,38 @@ func openBrowser(target string) error {
 
 func databases(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: comwit databases <create|import-dump|list|execute|delete|token|restore-points|restore|aliases>")
+		return errors.New("usage: comwit databases <create|configure|import-dump|list|execute|delete|token|restore-points|restore|aliases>")
 	}
 	switch args[0] {
 	case "create":
 		fs := flag.NewFlagSet("databases create", flag.ContinueOnError)
+		fs.SetOutput(stdout)
 		project := fs.String("project", "", "project id")
 		name := fs.String("name", "", "database name")
+		envOut := fs.String("env-out", "", "gitignored .env file to atomically update (keys: COMWIT_DATABASE_ID,DATABASE_URL)")
 		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
 			return err
 		}
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
 		if strings.TrimSpace(*name) == "" {
 			return errors.New("--name is required")
+		}
+		target, err := prepareEnvOutput(*envOut)
+		if err != nil {
+			return err
 		}
 		var body databaseCreateResponse
 		payload := map[string]string{"name": strings.TrimSpace(*name)}
@@ -749,10 +815,19 @@ func databases(args []string, stdout io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(stdout, "%s\t%s\tcreated=%t\n", body.DatabaseID, body.DatabaseURL, body.Created)
-		if body.DatabaseToken != nil && strings.TrimSpace(*body.DatabaseToken) != "" {
+		if target == "" && body.DatabaseToken != nil && strings.TrimSpace(*body.DatabaseToken) != "" {
 			fmt.Fprintf(stdout, "token\t%s\n", *body.DatabaseToken)
 		}
+		if target != "" {
+			keys, err := writeDatabaseEnv(target, body.DatabaseID, body.DatabaseURL)
+			if err != nil {
+				return fmt.Errorf("database was created but env output failed: %w", err)
+			}
+			printUpdatedEnvKeys(stdout, keys)
+		}
 		return nil
+	case "configure":
+		return databaseConfigureCommand(args[1:], stdout)
 	case "import-dump", "import":
 		return databaseImportDumpCommand(args[1:], stdout)
 	case "list":
@@ -765,7 +840,10 @@ func databases(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -836,6 +914,66 @@ func databaseTokenCommand(args []string, stdout io.Writer) error {
 	return nil
 }
 
+func databaseConfigureCommand(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("databases configure", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	fs.Usage = func() {
+		fmt.Fprintln(stdout, "Usage of databases configure:")
+		fmt.Fprintln(stdout, "resource-id-source: explicit,cwd-env")
+		fs.PrintDefaults()
+	}
+	project := fs.String("project", "", "project id")
+	database := fs.String("database", "", "database id; defaults to COMWIT_DATABASE_ID in safe cwd .env")
+	envOut := fs.String("env-out", "", "gitignored .env file to atomically update (keys: COMWIT_DATABASE_ID,DATABASE_URL)")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*envOut) == "" {
+		return errors.New("usage: comwit databases configure --project <id> [--database <id>] --env-out .env")
+	}
+	target, err := prepareEnvOutput(*envOut)
+	if err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	projectID, err := selectProject(*project, cfg)
+	if err != nil {
+		return err
+	}
+	if projectID == "" {
+		return errors.New("--project is required")
+	}
+	databaseID, err := selectStoredResourceIdentifier(*database, envDatabaseIDKey)
+	if err != nil {
+		return err
+	}
+	if databaseID == "" {
+		return errors.New("--database is required (or set COMWIT_DATABASE_ID in safe cwd gitignored .env)")
+	}
+	var body databasesListResponse
+	if err := newClient(cfg).getJSON(projectDatabasesPath(projectID), &body); err != nil {
+		return err
+	}
+	for _, database := range body.Databases {
+		if database.DatabaseID != databaseID {
+			continue
+		}
+		keys, err := writeDatabaseEnv(target, database.DatabaseID, database.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		printUpdatedEnvKeys(stdout, keys)
+		return nil
+	}
+	return fmt.Errorf("database %s was not found in project %s", databaseID, projectID)
+}
+
 func domainsCommand(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: comwit domains <list|add|check|delete|records>")
@@ -851,7 +989,10 @@ func domainsCommand(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -872,7 +1013,10 @@ func domainsCommand(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -898,7 +1042,10 @@ func domainsCommand(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -1075,7 +1222,10 @@ func projects(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	project := defaultProject(cfg)
+	project, err := defaultProject(cfg)
+	if err != nil {
+		return err
+	}
 	if project == "" {
 		return errors.New("project listing is not enabled by this API token yet; set a default with COMWIT_PROJECT or `comwit login --project <id>`")
 	}
@@ -1101,7 +1251,10 @@ func apps(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -1122,7 +1275,10 @@ func apps(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -1147,11 +1303,17 @@ func apps(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
-		appID := strings.TrimSpace(*app)
+		appID, err := selectApp(*app)
+		if err != nil {
+			return err
+		}
 		if appID == "" {
 			return errors.New("--app is required")
 		}
@@ -1480,11 +1642,18 @@ func deploy(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	projectID := selectProject(*project, cfg)
+	projectID, err := selectProject(*project, cfg)
+	if err != nil {
+		return err
+	}
 	if projectID == "" {
 		return errors.New("--project is required")
 	}
-	if strings.TrimSpace(*app) == "" {
+	appID, err := selectApp(*app)
+	if err != nil {
+		return err
+	}
+	if appID == "" {
 		return errors.New("--app is required")
 	}
 	if strings.TrimSpace(*pkg) == "" {
@@ -1513,7 +1682,7 @@ func deploy(args []string, stdout, stderr io.Writer) error {
 	if *maxConcurrent > 0 {
 		query.Set("max_concurrent_requests", strconv.FormatUint(uint64(*maxConcurrent), 10))
 	}
-	path := "/v1/projects/" + url.PathEscape(projectID) + "/apps/" + url.PathEscape(strings.TrimSpace(*app)) + "/deployments"
+	path := "/v1/projects/" + url.PathEscape(projectID) + "/apps/" + url.PathEscape(appID) + "/deployments"
 	if encoded := query.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
@@ -1629,7 +1798,7 @@ func (c *client) postPublic(path string, payload any, out any) error {
 
 func (c *client) do(method, path string, body []byte, contentType string, out any) error {
 	if strings.TrimSpace(c.token) == "" {
-		return errors.New("not logged in; run `comwit login --token <token>`")
+		return errors.New("not logged in; run `comwit login`")
 	}
 	req, err := http.NewRequest(method, c.apiURL+path, bytes.NewReader(body))
 	if err != nil {
@@ -1708,7 +1877,7 @@ func saveConfig(cfg configFile) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	if err := writePrivateFileAtomic(path, append(data, '\n')); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -1718,28 +1887,56 @@ func configPath() (string, error) {
 	if path := strings.TrimSpace(os.Getenv("COMWIT_CONFIG")); path != "" {
 		return path, nil
 	}
-	if dir := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); dir != "" {
+	return configPathForOS(runtime.GOOS, os.Getenv, os.UserHomeDir, os.UserConfigDir)
+}
+
+func configPathForOS(
+	_ string,
+	getenv func(string) string,
+	userHomeDir func() (string, error),
+	_ func() (string, error),
+) (string, error) {
+	// Keep the historical ~/.config location on every OS so upgrades continue
+	// using the credentials and default project written by earlier releases.
+	if dir := strings.TrimSpace(getenv("XDG_CONFIG_HOME")); dir != "" {
 		return filepath.Join(dir, "comwit", "config.json"), nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := userHomeDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, ".config", "comwit", "config.json"), nil
 }
 
-func selectProject(project string, cfg configFile) string {
+func selectProject(project string, cfg configFile) (string, error) {
 	if project = strings.TrimSpace(project); project != "" {
-		return project
+		return project, nil
 	}
 	return defaultProject(cfg)
 }
 
-func defaultProject(cfg configFile) string {
+func defaultProject(cfg configFile) (string, error) {
 	if project := strings.TrimSpace(os.Getenv("COMWIT_PROJECT")); project != "" {
-		return project
+		return project, nil
 	}
-	return strings.TrimSpace(cfg.DefaultProject)
+	project, err := cwdDotEnvIdentifier(envProjectKey)
+	if err != nil {
+		return "", err
+	}
+	if project != "" {
+		return project, nil
+	}
+	return strings.TrimSpace(cfg.DefaultProject), nil
+}
+
+func selectApp(app string) (string, error) {
+	if app = strings.TrimSpace(app); app != "" {
+		return app, nil
+	}
+	if app = strings.TrimSpace(os.Getenv("COMWIT_APP")); app != "" {
+		return app, nil
+	}
+	return cwdDotEnvIdentifier(envAppKey)
 }
 
 func domainCommandContext(project, domain string) (configFile, string, string, error) {
@@ -1747,7 +1944,10 @@ func domainCommandContext(project, domain string) (configFile, string, string, e
 	if err != nil {
 		return configFile{}, "", "", err
 	}
-	projectID := selectProject(project, cfg)
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if projectID == "" {
 		return configFile{}, "", "", errors.New("--project is required")
 	}
@@ -1763,7 +1963,10 @@ func databaseCommandContext(project, database string) (configFile, string, strin
 	if err != nil {
 		return configFile{}, "", "", err
 	}
-	projectID := selectProject(project, cfg)
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if projectID == "" {
 		return configFile{}, "", "", errors.New("--project is required")
 	}
@@ -1779,11 +1982,17 @@ func appCommandContext(project, app string) (configFile, string, string, error) 
 	if err != nil {
 		return configFile{}, "", "", err
 	}
-	projectID := selectProject(project, cfg)
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if projectID == "" {
 		return configFile{}, "", "", errors.New("--project is required")
 	}
-	appID := strings.TrimSpace(app)
+	appID, err := selectApp(app)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if appID == "" {
 		return configFile{}, "", "", errors.New("--app is required")
 	}

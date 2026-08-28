@@ -1,0 +1,150 @@
+{
+  "contractId": "comwit-infra-migration-expected-v8",
+  "credentials": {
+    "mcp": "COMWIT_PAT",
+    "runtime": "COMWIT_CLOUD_TOKEN",
+    "deploy": "COMWIT_DEPLOY_TOKEN"
+  },
+  "localUserAuthentication": {
+    "method": "device_flow",
+    "startCommand": "comwit login",
+    "verificationCommand": "comwit projects list",
+    "deviceStartPath": "/v1/auth/device",
+    "devicePollPath": "/v1/auth/device/token",
+    "serverTokenIssue": false,
+    "serverTokenRevoke": false
+  },
+  "localEnvironment": {
+    "mode": "persistent_gitignored_env",
+    "path": ".env",
+    "requiredContextKeys": ["COMWIT_PROJECT", "COMWIT_APP"],
+    "optionalResourceKeys": [
+      "COMWIT_DATABASE_ID",
+      "DATABASE_URL",
+      "COMWIT_STORAGE_ID",
+      "COMWIT_STORAGE_ENDPOINT",
+      "COMWIT_STORAGE_BUCKET",
+      "COMWIT_STORAGE_PUBLIC_BASE_URL"
+    ],
+    "secretKeys": ["COMWIT_CLOUD_TOKEN"]
+  },
+  "deploymentEnvironment": {
+    "requiredVariableKeys": ["COMWIT_PROJECT", "COMWIT_APP"],
+    "optionalResourceVariableKeys": [
+      "COMWIT_DATABASE_ID",
+      "DATABASE_URL",
+      "COMWIT_STORAGE_ID",
+      "COMWIT_STORAGE_ENDPOINT",
+      "COMWIT_STORAGE_BUCKET",
+      "COMWIT_STORAGE_PUBLIC_BASE_URL"
+    ],
+    "secretKeys": ["COMWIT_CLOUD_TOKEN", "COMWIT_DEPLOY_TOKEN"]
+  },
+  "projectResourceBinding": {
+    "owner": "comwit_server",
+    "table": "comwit_cloud_resource_binding",
+    "primaryKey": "id",
+    "projectUniqueKey": "projectId",
+    "projectIdentitySource": "project.ccProjectId",
+    "nullableIds": ["ccAppId", "ccDatabaseId", "ccStorageId"],
+    "legacyAppId": {
+      "source": "project.ccAppId",
+      "mode": "unused_retained_for_future_drop",
+      "drop": "future_migration"
+    },
+    "unboundPolicy": {
+      "zero": "leave_unset",
+      "one": "persist",
+      "many": "error"
+    },
+    "storedPolicy": "validate_exact",
+    "replacePolicy": "not_supported",
+    "selectionSurface": "none",
+    "clearSupported": false,
+    "cloudDetailPersistence": "none"
+  },
+  "projectResourceSetup": {
+    "controlPlane": "comwit_cli",
+    "diagnosticMcpListTool": "list_cloud_resources",
+    "publicMcpMutationTools": [],
+    "deploymentReconcileControlPlane": "comwit_server_publish",
+    "projectHandoffEnvWriter": ".agents/scripts/sync-resource-env.mjs",
+    "resourceEnvWriter": "comwit_cli_env_out",
+    "manualEnvEditing": false,
+    "resourceCliRequired": true,
+    "staleManagedEnvironmentRemoval": true,
+    "syncEffects": [
+      "persist_binding",
+      "fetch_latest_cloud_detail",
+      "upsert_cg_gitea_environment"
+    ],
+    "deploymentReconcileBeforePublish": true
+  },
+  "ports": {
+    "projectToken": {
+      "status": "pending_runtime_scope_and_idempotency_contract",
+      "purposes": ["deploy", "runtime"],
+      "issueInput": ["ccProjectId", "purpose"],
+      "issueOutput": ["tokenId", "tokenPrefix", "token", "scopes"],
+      "revokeInput": ["ccProjectId", "tokenId"],
+      "requiredRuntimeCapabilities": [
+        "database_data",
+        "storage_read",
+        "storage_write"
+      ],
+      "runtimeScopeNames": null
+    },
+    "cgSessionTemplateSelection": {
+      "status": "pending_external_contract",
+      "baseUrl": "https://cg.mvpstar.net",
+      "path": "/session",
+      "selectorField": null,
+      "intendedValue": "comwit",
+      "requestFields": ["memberId", "projectName"],
+      "responseEnvelope": "session"
+    },
+    "cgConfiguration": {
+      "status": "pending_external_contract",
+      "path": "/session/{sessionId}/env",
+      "apiSurface": "same_as_legacy",
+      "requiredVariableKeys": ["COMWIT_PROJECT", "COMWIT_APP"],
+      "optionalResourceVariableKeys": [
+        "COMWIT_DATABASE_ID",
+        "DATABASE_URL",
+        "COMWIT_STORAGE_ID",
+        "COMWIT_STORAGE_ENDPOINT",
+        "COMWIT_STORAGE_BUCKET",
+        "COMWIT_STORAGE_PUBLIC_BASE_URL"
+      ],
+      "secretKeys": ["COMWIT_CLOUD_TOKEN", "COMWIT_DEPLOY_TOKEN"],
+      "requiredGuarantees": [
+        "idempotent",
+        "available_to_actions",
+        "masked",
+        "rotatable",
+        "retryable"
+      ]
+    },
+    "databaseAuthentication": {
+      "status": "pending_external_contract",
+      "runtimeCredential": "COMWIT_CLOUD_TOKEN",
+      "legacyCredential": "DATABASE_AUTH_TOKEN",
+      "scopeNames": null
+    }
+  },
+  "stableExternalContracts": {
+    "appFields": ["app_id", "name", "default_url", "default_domain"],
+    "storagePresignPath": "/v1/projects/{projectId}/storages/{storageId}/presigned-urls",
+    "storageCorsProvisioning": "automatic_on_storage_setup"
+  },
+  "runtimeErrorCodes": ["comwit_cloud_resource_binding_selection"],
+  "pendingErrorCodes": [
+    "comwit_cloud_project_token_scopes",
+    "cg_template_selection",
+    "cg_environment_secret_upsert",
+    "database_comwit_token_auth",
+    "storage_comwit_token_auth",
+    "storage_presign_contract",
+    "prism_member_pat_revoke"
+  ]
+}

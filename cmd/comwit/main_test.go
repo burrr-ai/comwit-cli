@@ -24,6 +24,15 @@ func TestVersionCommand(t *testing.T) {
 	}
 }
 
+func TestProjectSetupAndEnvironmentAggregatorRemainUnavailable(t *testing.T) {
+	for _, command := range []string{"setup", "env"} {
+		err := run([]string{"projects", command}, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || err.Error() != "usage: comwit projects list" {
+			t.Fatalf("projects %s error = %v", command, err)
+		}
+	}
+}
+
 func TestLoginWritesConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
@@ -47,16 +56,17 @@ func TestLoginWritesConfig(t *testing.T) {
 }
 
 func TestSelectProjectPrefersFlagThenEnvThenConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
 	cfg := configFile{DefaultProject: "from-config"}
-	if got := selectProject("from-flag", cfg); got != "from-flag" {
+	if got, err := selectProject("from-flag", cfg); err != nil || got != "from-flag" {
 		t.Fatalf("flag project = %q", got)
 	}
 	t.Setenv("COMWIT_PROJECT", "from-env")
-	if got := selectProject("", cfg); got != "from-env" {
+	if got, err := selectProject("", cfg); err != nil || got != "from-env" {
 		t.Fatalf("env project = %q", got)
 	}
 	t.Setenv("COMWIT_PROJECT", "")
-	if got := selectProject("", cfg); got != "from-config" {
+	if got, err := selectProject("", cfg); err != nil || got != "from-config" {
 		t.Fatalf("config project = %q", got)
 	}
 }
