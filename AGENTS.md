@@ -56,6 +56,23 @@ explicitly asks for a temporary diagnostic tool.
   `package.json` identical. Generated npm binaries belong in ignored
   `npm/dist/`, never in Git.
 
+## Agent-authored pull requests
+
+Codex, Claude Code, and other coding agents must not open a pull request while
+authenticated as `GoodGoodJM` or another human account. They may commit and
+push an exact `codex/*` or `claude/*` work branch, then must dispatch the
+central `Agent PR publisher` workflow in `burrr-ai/comwit-sre` with the target
+repository, exact source branch and SHA, title, and redacted body. That workflow
+copies the exact SHA to an `automation/<source-branch>-<sha>` branch and opens
+the PR as `burrr-ai-release-automation[bot]`, requesting `GoodGoodJM` for
+review.
+
+Do not replace this with `gh pr create`, a human PAT, a shared machine-user
+account, automatic approval, or automatic merge. If the publisher is not live
+or cannot prove the exact source SHA, stop after pushing the work branch and
+report the branch/SHA as `WAITING FOR APP PR`; do not create a human-authored
+fallback PR.
+
 ## Verification
 
 Use the narrowest verification that matches the change:
