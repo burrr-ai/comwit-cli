@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,12 +15,11 @@ import (
 )
 
 func TestProjectAndAppResolutionPriorityIncludesDotEnv(t *testing.T) {
-	dir := t.TempDir()
+	dir := initGitEnvRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(strings.Join([]string{
 		"COMWIT_CLOUD_TOKEN=cwt_must_not_be_loaded",
 		"COMWIT_PROJECT=from-dotenv",
 		"COMWIT_APP='app-from-dotenv' # project app",
-		"COMWIT_PROJECT=from-dotenv-last",
 		"",
 	}, "\n")), 0o600); err != nil {
 		t.Fatal(err)
@@ -31,26 +29,195 @@ func TestProjectAndAppResolutionPriorityIncludesDotEnv(t *testing.T) {
 	t.Setenv("COMWIT_APP", "")
 
 	cfg := configFile{DefaultProject: "from-config"}
-	if got := selectProject("from-flag", cfg); got != "from-flag" {
-		t.Fatalf("flag project = %q", got)
+	if got, err := selectProject("from-flag", cfg); err != nil || got != "from-flag" {
+		t.Fatalf("flag project = %q, err = %v", got, err)
 	}
-	if got := selectProject("", cfg); got != "from-dotenv-last" {
-		t.Fatalf("dotenv project = %q", got)
+	if got, err := selectProject("", cfg); err != nil || got != "from-dotenv" {
+		t.Fatalf("dotenv project = %q, err = %v", got, err)
 	}
-	if got := selectApp(""); got != "app-from-dotenv" {
-		t.Fatalf("dotenv app = %q", got)
+	if got, err := selectApp(""); err != nil || got != "app-from-dotenv" {
+		t.Fatalf("dotenv app = %q, err = %v", got, err)
 	}
-	if got := cwdDotEnvIdentifier(envCloudTokenKey); got != "" {
-		t.Fatalf("secret resolver returned %q", got)
+	if got, err := cwdDotEnvIdentifier(envCloudTokenKey); err != nil || got != "" {
+		t.Fatalf("secret resolver returned %q, err = %v", got, err)
 	}
 
 	t.Setenv("COMWIT_PROJECT", "from-shell")
 	t.Setenv("COMWIT_APP", "app-from-shell")
-	if got := selectProject("", cfg); got != "from-shell" {
-		t.Fatalf("shell project = %q", got)
+	if got, err := selectProject("", cfg); err != nil || got != "from-shell" {
+		t.Fatalf("shell project = %q, err = %v", got, err)
 	}
-	if got := selectApp(""); got != "app-from-shell" {
-		t.Fatalf("shell app = %q", got)
+	if got, err := selectApp(""); err != nil || got != "app-from-shell" {
+		t.Fatalf("shell app = %q, err = %v", got, err)
+	}
+}
+
+func TestDotEnvContextRejectsUnsafeMalformedAndDuplicateFiles(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T) string
+		wantErr string
+	}{
+		{
+			name: "outside git worktree",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT=outside\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			wantErr: "inside a Git worktree",
+		},
+		{
+			name: "tracked",
+			setup: func(t *testing.T) string {
+				dir := initGitEnvRepo(t)
+				if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT=tracked\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, dir, "add", "-f", ".env")
+				return dir
+			},
+			wantErr: "tracked",
+		},
+		{
+			name: "not gitignored",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				runGit(t, dir, "init", "-q")
+				if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT=unignored\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			wantErr: "not gitignored",
+		},
+		{
+			name: "not regular",
+			setup: func(t *testing.T) string {
+				dir := initGitEnvRepo(t)
+				if err := os.Mkdir(filepath.Join(dir, ".env"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			wantErr: "not a regular file",
+		},
+		{
+			name: "malformed target",
+			setup: func(t *testing.T) string {
+				dir := initGitEnvRepo(t)
+				if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT='unterminated\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			wantErr: "parse COMWIT_PROJECT",
+		},
+		{
+			name: "malformed target without assignment",
+			setup: func(t *testing.T) string {
+				dir := initGitEnvRepo(t)
+				if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT malformed\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			wantErr: "malformed COMWIT_PROJECT",
+		},
+		{
+			name: "duplicate target",
+			setup: func(t *testing.T) string {
+				dir := initGitEnvRepo(t)
+				if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT=one\nCOMWIT_PROJECT=two\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			wantErr: "duplicate COMWIT_PROJECT",
+		},
+		{
+			name: "read error",
+			setup: func(t *testing.T) string {
+				dir := initGitEnvRepo(t)
+				tooLong := strings.Repeat("x", 1024*1024+1) + "\nCOMWIT_PROJECT=unreachable\n"
+				if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(tooLong), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			wantErr: "read .env context",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := test.setup(t)
+			t.Chdir(dir)
+			t.Setenv("COMWIT_PROJECT", "")
+			got, err := selectProject("", configFile{DefaultProject: "must-not-fallback"})
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("project = %q, err = %v", got, err)
+			}
+		})
+	}
+}
+
+func TestDotEnvContextRejectsSymlink(t *testing.T) {
+	dir := initGitEnvRepo(t)
+	realPath := filepath.Join(dir, "real.env")
+	if err := os.WriteFile(realPath, []byte("COMWIT_PROJECT=symlinked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realPath, filepath.Join(dir, ".env")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if got, err := selectProject("", configFile{DefaultProject: "must-not-fallback"}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("project = %q, err = %v", got, err)
+	}
+}
+
+func TestDotEnvAppContextRejectsDuplicateTarget(t *testing.T) {
+	dir := initGitEnvRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_APP=one\nCOMWIT_APP=two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if got, err := selectApp(""); err == nil || !strings.Contains(err.Error(), "duplicate COMWIT_APP") {
+		t.Fatalf("app = %q, err = %v", got, err)
+	}
+}
+
+func TestMutatingCommandFailsClosedOnInvalidDotEnvContext(t *testing.T) {
+	dir := initGitEnvRepo(t)
+	t.Chdir(dir)
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "cwt_test", DefaultProject: "must-not-fallback"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT=one\nCOMWIT_PROJECT=two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	err := run([]string{"storage", "delete", "--storage", "stg_1"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "duplicate COMWIT_PROJECT") {
+		t.Fatalf("error = %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("invalid .env context sent %d requests", requests)
 	}
 }
 
@@ -271,29 +438,7 @@ func TestDotEnvAppFallbackAndCWPDeploy(t *testing.T) {
 	}
 }
 
-func TestStorageCORSPendingDoesNotSendRequest(t *testing.T) {
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusTeapot)
-	}))
-	defer server.Close()
-	t.Setenv("COMWIT_API_URL", server.URL)
-
-	err := run([]string{"storage", "cors", "get", "--project", "proj_1", "--storage", "stg_1"}, &bytes.Buffer{}, &bytes.Buffer{})
-	var pending ExternalContractPendingError
-	if !errors.As(err, &pending) {
-		t.Fatalf("error = %v", err)
-	}
-	if pending.Feature != "storage_cors_contract" {
-		t.Fatalf("pending feature = %q", pending.Feature)
-	}
-	if requests != 0 {
-		t.Fatalf("pending command sent %d requests", requests)
-	}
-}
-
-func TestConfigPathAndPrivatePermissions(t *testing.T) {
+func TestConfigPathPreservesLegacyLocationAndPrivatePermissions(t *testing.T) {
 	path, err := configPathForOS(
 		"windows",
 		func(string) string { return "" },
@@ -303,7 +448,7 @@ func TestConfigPathAndPrivatePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path != filepath.Join("/AppData/Roaming", "comwit", "config.json") {
+	if path != filepath.Join("/home/ignored", ".config", "comwit", "config.json") {
 		t.Fatalf("windows config path = %q", path)
 	}
 

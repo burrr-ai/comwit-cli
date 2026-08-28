@@ -23,8 +23,18 @@ const hasExactItems = (actual, expected) =>
   actual.length === expected.length &&
   actual.every((item, index) => item === expected[index]);
 
+const requiredContextKeys = ["COMWIT_PROJECT", "COMWIT_APP"];
+const optionalResourceKeys = [
+  "COMWIT_DATABASE_ID",
+  "DATABASE_URL",
+  "COMWIT_STORAGE_ID",
+  "COMWIT_STORAGE_ENDPOINT",
+  "COMWIT_STORAGE_BUCKET",
+  "COMWIT_STORAGE_PUBLIC_BASE_URL",
+];
+
 if (
-  expectedContract.contractId !== "comwit-infra-migration-expected-v5" ||
+  expectedContract.contractId !== "comwit-infra-migration-expected-v6" ||
   expectedContract.template !== undefined ||
   Object.keys(expectedContract.credentials ?? {}).length !== 3 ||
   expectedContract.credentials?.mcp !== "COMWIT_PAT" ||
@@ -41,72 +51,111 @@ if (
   expectedContract.localUserAuthentication?.serverTokenIssue !== false ||
   expectedContract.localUserAuthentication?.serverTokenRevoke !== false ||
   expectedContract.ports?.userToken !== undefined ||
-  expectedContract.ports?.cgRouting?.status !==
-    "pending_comwit_base_url" ||
-  expectedContract.ports?.cgRouting?.legacyBaseUrl !==
-    "https://cg.mvpstar.net" ||
-  expectedContract.ports?.cgRouting?.comwitBaseUrl !== null ||
-  expectedContract.ports?.cgRouting?.routingKey !==
-    "persisted_session_backend" ||
-  expectedContract.ports?.cgRouting?.apiSurface !== "same_as_legacy" ||
-  expectedContract.ports?.cgRouting?.sessionCreatePath !== "/session" ||
-  !hasExactItems(expectedContract.ports?.cgRouting?.requestFields, [
-    "memberId",
-    "projectName",
-  ]) ||
-  expectedContract.ports?.cgRouting?.responseEnvelope !== "session" ||
-  expectedContract.ports?.cgRouting?.serverDefaultTemplate !== "comwit" ||
-  expectedContract.ports?.cgRouting?.authContract !== null ||
-  !hasExactItems(expectedContract.ports?.cgRouting?.requiredPathFamilies, [
-    "session",
-    "deployment",
-    "env",
-    "usage",
-    "message",
-    "stream",
-    "command",
+  expectedContract.resourceBindings !== undefined ||
+  expectedContract.localEnvironment?.mode !==
+    "persistent_gitignored_env" ||
+  expectedContract.localEnvironment?.path !== ".env" ||
+  !hasExactItems(
+    expectedContract.localEnvironment?.requiredContextKeys,
+    requiredContextKeys,
+  ) ||
+  !hasExactItems(
+    expectedContract.localEnvironment?.optionalResourceKeys,
+    optionalResourceKeys,
+  ) ||
+  !hasExactItems(expectedContract.localEnvironment?.secretKeys, [
+    "COMWIT_CLOUD_TOKEN",
   ]) ||
   !hasExactItems(
-    expectedContract.ports?.cgRouting?.forbiddenRequestFields,
-    ["template", "hostingProvider", "templateRepo", "templateRef"],
+    expectedContract.deploymentEnvironment?.requiredVariableKeys,
+    requiredContextKeys,
   ) ||
+  !hasExactItems(
+    expectedContract.deploymentEnvironment?.optionalResourceVariableKeys,
+    optionalResourceKeys,
+  ) ||
+  !hasExactItems(expectedContract.deploymentEnvironment?.secretKeys, [
+    "COMWIT_CLOUD_TOKEN",
+    "COMWIT_DEPLOY_TOKEN",
+  ]) ||
+  expectedContract.projectResourceSetup?.controlPlane !== "comwit_mcp" ||
+  expectedContract.projectResourceSetup?.listTool !== "list_cloud_resources" ||
+  expectedContract.projectResourceSetup?.createDatabaseTool !==
+    "create_cloud_database" ||
+  expectedContract.projectResourceSetup?.createStorageTool !==
+    "create_cloud_storage" ||
+  expectedContract.projectResourceSetup?.deploymentSyncTool !==
+    "sync_cloud_resource_env" ||
+  expectedContract.projectResourceSetup?.localEnvWriter !==
+    ".agents/scripts/sync-resource-env.mjs" ||
+  expectedContract.projectResourceSetup?.manualEnvEditing !== false ||
+  expectedContract.projectResourceSetup?.resourceCliRequired !== false ||
+  expectedContract.ports?.cgRouting !== undefined ||
+  expectedContract.ports?.cgSessionTemplateSelection?.status !==
+    "pending_external_contract" ||
+  expectedContract.ports?.cgSessionTemplateSelection?.baseUrl !==
+    "https://cg.mvpstar.net" ||
+  expectedContract.ports?.cgSessionTemplateSelection?.path !== "/session" ||
+  expectedContract.ports?.cgSessionTemplateSelection?.selectorField !== null ||
+  expectedContract.ports?.cgSessionTemplateSelection?.intendedValue !==
+    "comwit" ||
+  !hasExactItems(
+    expectedContract.ports?.cgSessionTemplateSelection?.requestFields,
+    ["memberId", "projectName"],
+  ) ||
+  expectedContract.ports?.cgSessionTemplateSelection?.responseEnvelope !==
+    "session" ||
   expectedContract.ports?.cgConfiguration?.status !==
-    "pending_comwit_base_url" ||
+    "pending_external_contract" ||
   expectedContract.ports?.cgConfiguration?.path !==
     "/session/{sessionId}/env" ||
   expectedContract.ports?.cgConfiguration?.apiSurface !== "same_as_legacy" ||
-  !hasExactItems(expectedContract.ports?.cgConfiguration?.environmentKeys, [
-    "COMWIT_PROJECT",
-    "COMWIT_APP",
-  ]) ||
-  expectedContract.resourceBindings?.mode !== "tracked_source" ||
-  expectedContract.resourceBindings?.sourceFile !==
-    "src/server/resource-config.ts" ||
-  expectedContract.resourceBindings?.exportName !== "comwitResources" ||
-  expectedContract.resourceBindings?.databaseField !== "databaseUrl" ||
-  expectedContract.resourceBindings?.storageFields?.id !== "id" ||
-  expectedContract.resourceBindings?.storageFields?.endpoint !== "endpoint" ||
-  expectedContract.resourceBindings?.storageFields?.bucket !== "bucket" ||
-  expectedContract.resourceBindings?.storageFields?.publicBaseUrl !==
-    "publicBaseUrl" ||
-  expectedContract.resourceBindings?.stagingEnvCleanup?.after !==
-    "verified_source_update" ||
   !hasExactItems(
-    expectedContract.resourceBindings?.stagingEnvCleanup?.database,
-    ["DATABASE_URL"],
+    expectedContract.ports?.cgConfiguration?.requiredVariableKeys,
+    requiredContextKeys,
   ) ||
-  !hasExactItems(expectedContract.resourceBindings?.stagingEnvCleanup?.storage, [
-    "COMWIT_STORAGE_ID",
-    "COMWIT_STORAGE_ENDPOINT",
-    "COMWIT_STORAGE_BUCKET",
-    "COMWIT_STORAGE_PUBLIC_BASE_URL",
+  !hasExactItems(
+    expectedContract.ports?.cgConfiguration?.optionalResourceVariableKeys,
+    optionalResourceKeys,
+  ) ||
+  !hasExactItems(expectedContract.ports?.cgConfiguration?.secretKeys, [
+    "COMWIT_CLOUD_TOKEN",
+    "COMWIT_DEPLOY_TOKEN",
   ]) ||
+  !hasExactItems(
+    expectedContract.ports?.cgConfiguration?.requiredGuarantees,
+    [
+      "idempotent",
+      "available_to_actions",
+      "masked",
+      "rotatable",
+      "deletable",
+      "retryable",
+    ],
+  ) ||
   expectedContract.ports?.projectToken?.runtimeScopeNames !== null ||
-  expectedContract.pendingErrorCodes?.includes("storage_cors_contract") !== true ||
+  expectedContract.ports?.databaseAuthentication?.status !==
+    "pending_external_contract" ||
+  expectedContract.stableExternalContracts?.storagePresignPath !==
+    "/v1/projects/{projectId}/storages/{storageId}/presigned-urls" ||
+  expectedContract.stableExternalContracts?.storageCorsProvisioning !==
+    "automatic_on_storage_setup" ||
+  !hasExactItems(expectedContract.runtimeErrorCodes, [
+    "comwit_cloud_resource_binding_selection",
+  ]) ||
+  !hasExactItems(expectedContract.pendingErrorCodes, [
+    "comwit_cloud_project_token_scopes",
+    "comwit_cloud_database_server_create_auth",
+    "cg_template_selection",
+    "cg_environment_secret_upsert",
+    "database_comwit_token_auth",
+    "storage_comwit_token_auth",
+    "storage_presign_contract",
+    "prism_member_pat_revoke",
+  ]) ||
   expectedContract.pendingErrorCodes?.includes("comwit_cloud_user_token_issue") ||
   expectedContract.pendingErrorCodes?.includes("comwit_cloud_user_token_revoke") ||
-  expectedContract.pendingErrorCodes?.includes("cg_comwit_session_create") ||
-  expectedContract.pendingErrorCodes?.includes("cg_environment_secret_upsert")
+  expectedContract.pendingErrorCodes?.includes("cg_comwit_session_create")
 ) {
   throw new Error("Comwit infrastructure expected contract fixture is invalid");
 }

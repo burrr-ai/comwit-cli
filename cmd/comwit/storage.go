@@ -35,7 +35,7 @@ type storagesResponse struct {
 
 func storageCommand(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: comwit storage <create|list|get|public|cors|delete>")
+		return errors.New("usage: comwit storage <create|list|get|public|delete>")
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
@@ -49,8 +49,6 @@ func storageCommand(args []string, stdout io.Writer) error {
 		return storageGetCommand(args[1:], stdout)
 	case "public":
 		return storagePublicCommand(args[1:], stdout)
-	case "cors":
-		return storageCORSCommand(args[1:], stdout)
 	case "delete":
 		return storageDeleteCommand(args[1:], stdout)
 	default:
@@ -64,7 +62,6 @@ func storageUsage(w io.Writer) {
   comwit storage list --project <id>
   comwit storage get --project <id> --storage <id> [--env-out .env]
   comwit storage public <enable|disable> --project <id> --storage <id>
-  comwit storage cors <get|set|delete>  (pending authoritative API contract)
   comwit storage delete --project <id> --storage <id>`)
 }
 
@@ -82,7 +79,10 @@ func storageCreateCommand(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	projectID := selectProject(*project, cfg)
+	projectID, err := selectProject(*project, cfg)
+	if err != nil {
+		return err
+	}
 	if projectID == "" {
 		return errors.New("--project is required")
 	}
@@ -120,7 +120,10 @@ func storageListCommand(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	projectID := selectProject(*project, cfg)
+	projectID, err := selectProject(*project, cfg)
+	if err != nil {
+		return err
+	}
 	if projectID == "" {
 		return errors.New("--project is required")
 	}
@@ -161,28 +164,6 @@ func storageGetCommand(args []string, stdout io.Writer) error {
 		printUpdatedEnvKeys(stdout, keys)
 	}
 	return nil
-}
-
-type ExternalContractPendingError struct {
-	Feature string
-}
-
-func (err ExternalContractPendingError) Error() string {
-	return fmt.Sprintf("external contract pending: %s is not present in the authoritative Comwit Cloud OpenAPI; no request was sent", err.Feature)
-}
-
-func storageCORSCommand(args []string, stdout io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("usage: comwit storage cors <get|set|delete>")
-	}
-	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprintln(stdout, "Usage: comwit storage cors <get|set|delete> (pending authoritative API contract)")
-		return nil
-	}
-	if args[0] != "get" && args[0] != "set" && args[0] != "delete" {
-		return fmt.Errorf("unknown storage cors command %q", args[0])
-	}
-	return ExternalContractPendingError{Feature: "storage_cors_contract"}
 }
 
 func storagePublicCommand(args []string, stdout io.Writer) error {
@@ -232,7 +213,10 @@ func storageCommandContext(project, id string) (configFile, string, string, erro
 	if err != nil {
 		return configFile{}, "", "", err
 	}
-	projectID := selectProject(project, cfg)
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if projectID == "" {
 		return configFile{}, "", "", errors.New("--project is required")
 	}

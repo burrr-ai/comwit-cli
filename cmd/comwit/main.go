@@ -790,7 +790,10 @@ func databases(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -836,7 +839,10 @@ func databases(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -962,7 +968,10 @@ func domainsCommand(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -983,7 +992,10 @@ func domainsCommand(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -1009,7 +1021,10 @@ func domainsCommand(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -1186,7 +1201,10 @@ func projects(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	project := defaultProject(cfg)
+	project, err := defaultProject(cfg)
+	if err != nil {
+		return err
+	}
 	if project == "" {
 		return errors.New("project listing is not enabled by this API token yet; set a default with COMWIT_PROJECT or `comwit login --project <id>`")
 	}
@@ -1212,7 +1230,10 @@ func apps(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -1233,7 +1254,10 @@ func apps(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
@@ -1258,11 +1282,17 @@ func apps(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		projectID := selectProject(*project, cfg)
+		projectID, err := selectProject(*project, cfg)
+		if err != nil {
+			return err
+		}
 		if projectID == "" {
 			return errors.New("--project is required")
 		}
-		appID := selectApp(*app)
+		appID, err := selectApp(*app)
+		if err != nil {
+			return err
+		}
 		if appID == "" {
 			return errors.New("--app is required")
 		}
@@ -1591,11 +1621,17 @@ func deploy(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	projectID := selectProject(*project, cfg)
+	projectID, err := selectProject(*project, cfg)
+	if err != nil {
+		return err
+	}
 	if projectID == "" {
 		return errors.New("--project is required")
 	}
-	appID := selectApp(*app)
+	appID, err := selectApp(*app)
+	if err != nil {
+		return err
+	}
 	if appID == "" {
 		return errors.New("--app is required")
 	}
@@ -1834,19 +1870,14 @@ func configPath() (string, error) {
 }
 
 func configPathForOS(
-	goos string,
+	_ string,
 	getenv func(string) string,
 	userHomeDir func() (string, error),
-	userConfigDir func() (string, error),
+	_ func() (string, error),
 ) (string, error) {
+	// Keep the historical ~/.config location on every OS so upgrades continue
+	// using the credentials and default project written by earlier releases.
 	if dir := strings.TrimSpace(getenv("XDG_CONFIG_HOME")); dir != "" {
-		return filepath.Join(dir, "comwit", "config.json"), nil
-	}
-	if goos == "windows" {
-		dir, err := userConfigDir()
-		if err != nil {
-			return "", err
-		}
 		return filepath.Join(dir, "comwit", "config.json"), nil
 	}
 	home, err := userHomeDir()
@@ -1856,29 +1887,33 @@ func configPathForOS(
 	return filepath.Join(home, ".config", "comwit", "config.json"), nil
 }
 
-func selectProject(project string, cfg configFile) string {
+func selectProject(project string, cfg configFile) (string, error) {
 	if project = strings.TrimSpace(project); project != "" {
-		return project
+		return project, nil
 	}
 	return defaultProject(cfg)
 }
 
-func defaultProject(cfg configFile) string {
+func defaultProject(cfg configFile) (string, error) {
 	if project := strings.TrimSpace(os.Getenv("COMWIT_PROJECT")); project != "" {
-		return project
+		return project, nil
 	}
-	if project := cwdDotEnvIdentifier(envProjectKey); project != "" {
-		return project
+	project, err := cwdDotEnvIdentifier(envProjectKey)
+	if err != nil {
+		return "", err
 	}
-	return strings.TrimSpace(cfg.DefaultProject)
+	if project != "" {
+		return project, nil
+	}
+	return strings.TrimSpace(cfg.DefaultProject), nil
 }
 
-func selectApp(app string) string {
+func selectApp(app string) (string, error) {
 	if app = strings.TrimSpace(app); app != "" {
-		return app
+		return app, nil
 	}
 	if app = strings.TrimSpace(os.Getenv("COMWIT_APP")); app != "" {
-		return app
+		return app, nil
 	}
 	return cwdDotEnvIdentifier(envAppKey)
 }
@@ -1888,7 +1923,10 @@ func domainCommandContext(project, domain string) (configFile, string, string, e
 	if err != nil {
 		return configFile{}, "", "", err
 	}
-	projectID := selectProject(project, cfg)
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if projectID == "" {
 		return configFile{}, "", "", errors.New("--project is required")
 	}
@@ -1904,7 +1942,10 @@ func databaseCommandContext(project, database string) (configFile, string, strin
 	if err != nil {
 		return configFile{}, "", "", err
 	}
-	projectID := selectProject(project, cfg)
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if projectID == "" {
 		return configFile{}, "", "", errors.New("--project is required")
 	}
@@ -1920,11 +1961,17 @@ func appCommandContext(project, app string) (configFile, string, string, error) 
 	if err != nil {
 		return configFile{}, "", "", err
 	}
-	projectID := selectProject(project, cfg)
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if projectID == "" {
 		return configFile{}, "", "", errors.New("--project is required")
 	}
-	appID := selectApp(app)
+	appID, err := selectApp(app)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
 	if appID == "" {
 		return configFile{}, "", "", errors.New("--app is required")
 	}

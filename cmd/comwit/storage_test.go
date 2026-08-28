@@ -148,6 +148,13 @@ func TestStorageHelp(t *testing.T) {
 	}
 }
 
+func TestStorageCORSCommandRemainsRemoved(t *testing.T) {
+	err := run([]string{"storage", "cors", "get", "--project", "proj_1", "--storage", "stg_1"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), `unknown storage command "cors"`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestStoragePathsEscapeIdentifiers(t *testing.T) {
 	if got := projectStoragesPath("project one"); got != "/v1/projects/project%20one/storages" {
 		t.Fatalf("path=%q", got)

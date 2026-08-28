@@ -35,26 +35,30 @@ type envUpdate struct {
 // cwdDotEnvIdentifier deliberately permits only the non-secret project and App
 // identifiers. In particular, command context resolution must never load the
 // COMWIT_CLOUD_TOKEN value from a project file.
-func cwdDotEnvIdentifier(key string) string {
+func cwdDotEnvIdentifier(key string) (string, error) {
 	if key != envProjectKey && key != envAppKey {
-		return ""
+		return "", nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("resolve current directory: %w", err)
 	}
-	value, err := readDotEnvValue(filepath.Join(cwd, ".env"), key)
+	path, exists, err := validateDotEnvContextPath(filepath.Join(cwd, ".env"))
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(value)
+	if !exists {
+		return "", nil
+	}
+	value, err := readDotEnvValue(path, key)
+	if err != nil {
+		return "", fmt.Errorf("read .env context: %w", err)
+	}
+	return strings.TrimSpace(value), nil
 }
 
 func readDotEnvValue(path, wantedKey string) (string, error) {
 	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
 	if err != nil {
 		return "", err
 	}
@@ -63,21 +67,51 @@ func readDotEnvValue(path, wantedKey string) (string, error) {
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	value := ""
+	found := false
 	for scanner.Scan() {
-		key, raw, ok := parseDotEnvAssignment(scanner.Text())
-		if !ok || key != wantedKey {
+		line := scanner.Text()
+		key, raw, ok := parseDotEnvAssignment(line)
+		if !ok {
+			if dotEnvLineTargetsKey(line, wantedKey) {
+				return "", fmt.Errorf("malformed %s assignment", wantedKey)
+			}
 			continue
+		}
+		if key != wantedKey {
+			continue
+		}
+		if found {
+			return "", fmt.Errorf("duplicate %s assignment", wantedKey)
 		}
 		parsed, err := parseDotEnvValue(raw)
 		if err != nil {
 			return "", fmt.Errorf("parse %s from .env: %w", wantedKey, err)
 		}
 		value = parsed
+		found = true
 	}
 	if err := scanner.Err(); err != nil {
 		return "", err
 	}
 	return value, nil
+}
+
+func dotEnvLineTargetsKey(line, wantedKey string) bool {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "export ") || strings.HasPrefix(trimmed, "export\t") {
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "export"))
+	}
+	if !strings.HasPrefix(trimmed, wantedKey) {
+		return false
+	}
+	if len(trimmed) == len(wantedKey) {
+		return true
+	}
+	next := trimmed[len(wantedKey)]
+	return !(next == '_' || next >= 'a' && next <= 'z' || next >= 'A' && next <= 'Z' || next >= '0' && next <= '9')
 }
 
 func parseDotEnvAssignment(line string) (string, string, bool) {
@@ -159,6 +193,31 @@ func prepareEnvOutput(path string) (string, error) {
 	return validateEnvOutputPath(path)
 }
 
+func validateDotEnvContextPath(path string) (string, bool, error) {
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", false, fmt.Errorf("resolve .env context path: %w", err)
+	}
+	info, err := os.Lstat(absPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("inspect .env context: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", false, fmt.Errorf("refusing .env context symlink %s", absPath)
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, fmt.Errorf(".env context is not a regular file: %s", absPath)
+	}
+	validated, err := validateGitignoredUntrackedPath(absPath)
+	if err != nil {
+		return "", false, fmt.Errorf("refusing .env context: %w", err)
+	}
+	return validated, true, nil
+}
+
 func validateEnvOutputPath(path string) (string, error) {
 	absPath, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
@@ -175,16 +234,20 @@ func validateEnvOutputPath(path string) (string, error) {
 		return "", fmt.Errorf("inspect env output: %w", err)
 	}
 
+	return validateGitignoredUntrackedPath(absPath)
+}
+
+func validateGitignoredUntrackedPath(absPath string) (string, error) {
 	parent := filepath.Dir(absPath)
 	resolvedParent, err := filepath.EvalSymlinks(parent)
 	if err != nil {
-		return "", fmt.Errorf("resolve env output directory: %w", err)
+		return "", fmt.Errorf("resolve env directory: %w", err)
 	}
 	absPath = filepath.Join(resolvedParent, filepath.Base(absPath))
 	parent = resolvedParent
 	rootBytes, err := exec.Command("git", "-C", parent, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		return "", errors.New("env output must be inside a Git worktree and ignored by Git")
+		return "", errors.New("env file must be inside a Git worktree and ignored by Git")
 	}
 	root := strings.TrimSpace(string(rootBytes))
 	if resolvedRoot, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
@@ -192,23 +255,23 @@ func validateEnvOutputPath(path string) (string, error) {
 	}
 	relative, err := filepath.Rel(root, absPath)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", errors.New("env output must stay inside its Git worktree")
+		return "", errors.New("env file must stay inside its Git worktree")
 	}
 	gitPath := filepath.ToSlash(relative)
 
 	tracked := exec.Command("git", "-C", root, "ls-files", "--error-unmatch", "--", gitPath)
 	if err := tracked.Run(); err == nil {
-		return "", fmt.Errorf("refusing to write tracked env file %s", absPath)
+		return "", fmt.Errorf("env file is tracked: %s", absPath)
 	} else if exitCode(err) != 1 {
-		return "", errors.New("could not verify whether env output is tracked")
+		return "", errors.New("could not verify whether env file is tracked")
 	}
 
 	ignored := exec.Command("git", "-C", root, "check-ignore", "--quiet", "--no-index", "--", gitPath)
 	if err := ignored.Run(); err != nil {
 		if exitCode(err) == 1 {
-			return "", fmt.Errorf("refusing to write env file that is not gitignored: %s", absPath)
+			return "", fmt.Errorf("env file is not gitignored: %s", absPath)
 		}
-		return "", errors.New("could not verify whether env output is gitignored")
+		return "", errors.New("could not verify whether env file is gitignored")
 	}
 	return absPath, nil
 }

@@ -78,27 +78,36 @@ replacement token.
 Project-aware commands resolve `--project`, then `COMWIT_PROJECT`, then the
 current directory's gitignored `.env`, then the config default. App-aware
 commands resolve `--app`, then `COMWIT_APP`, then `.env`. Context resolution
-does not read `COMWIT_CLOUD_TOKEN` from `.env`.
+does not read `COMWIT_CLOUD_TOKEN` from `.env`. A tracked, unignored,
+non-regular, unreadable, malformed, or duplicate context file/key is an error;
+the CLI does not silently fall back to its config default.
 
 `comwit auth export-token --env-out .env` copies the logged-in user `cwt_` into
 `COMWIT_CLOUD_TOKEN` without printing it. Use that file-writing command instead
-of exporting the credential into the shell or parsing command stdout. Database
-and Storage `--env-out .env` flags use the same protected writer, but their
-non-secret resource values are temporary staging data for a generated
-`comwit-template` project. The writer refuses tracked or non-gitignored files,
-preserves unrelated keys and comments, replaces the file atomically, and
-applies user-only permissions where supported:
+of exporting the credential into the shell or parsing command stdout.
+Database and Storage `--env-out .env` flags use the same protected writer and
+maintain persistent local environment values:
 
-- `databases create --env-out .env` stages only `DATABASE_URL`; it neither
-  prints nor persists the legacy one-time `database_token`.
-- `storage create --env-out .env` and `storage get --env-out .env` stage the
-  Storage ID, endpoint, bucket, and optional public base URL.
-- The matching `comwit-template` setup skill reads those exact keys, writes
-  them to the project's tracked `src/server/resource-config.ts`, verifies the
-  result, and only then removes the consumed staging keys from `.env`. It
-  preserves `COMWIT_PROJECT`, `COMWIT_APP`, `COMWIT_CLOUD_TOKEN`, and every
-  unrelated entry. If source writing or verification fails, it leaves the
-  staged values in place so the setup can be retried safely.
+- `databases create --env-out .env` and `databases configure --env-out .env`
+  update only `DATABASE_URL`. Create neither prints nor persists the legacy
+  one-time `database_token` when `--env-out` is used.
+- `storage create --env-out .env` and `storage get --env-out .env` update only
+  the four `COMWIT_STORAGE_*` values. `COMWIT_STORAGE_PUBLIC_BASE_URL` may be
+  empty while Storage is private or public delivery is still provisioning.
+
+The writer refuses tracked or non-gitignored files, preserves unrelated keys
+and comments, replaces the file atomically, and applies user-only permissions
+where supported. Resource commands require an explicit database or Storage ID;
+the CLI does not aggregate a project environment or select the first resource.
+`COMWIT_PROJECT` and `COMWIT_APP` remain caller-supplied project context.
+`COMWIT_DATABASE_ID` is optional caller-supplied database context paired with
+`DATABASE_URL`; CLI resource commands do not persist that database selection.
+
+For deployment configuration, store `COMWIT_PROJECT` and `COMWIT_APP` as
+Variables. Add `COMWIT_DATABASE_ID`, `DATABASE_URL`, and the
+`COMWIT_STORAGE_*` values as Variables only for selected resources. Store
+`COMWIT_CLOUD_TOKEN` and
+`COMWIT_DEPLOY_TOKEN` as Secrets, never as Variables.
 
 Creating the remote resource and writing `.env` are separate steps. If a
 `databases create --env-out .env` invocation creates the database but the local
@@ -108,9 +117,6 @@ instead of creating another database. For the equivalent Storage failure, use
 without `--env-out` retains the existing one-time database token output for
 compatibility; automated setup must not scrape that output.
 
-Storage CORS commands remain fail-closed until the CORS routes and canonical
-policy schema appear in the authoritative Comwit Cloud OpenAPI; the CLI does
-not call a guessed endpoint.
 SQL execution is remote by default and goes through the project-scoped Comwit
 API; use `--json` for the stable API result envelope. See the
 [full CLI guide](https://github.com/burrr-ai/comwit-cloud/blob/main/docs/guides/cli.md)
