@@ -1,0 +1,117 @@
+name: One-time App PR bootstrap
+
+on:
+  push:
+    branches:
+      - codex/agent-pr-standard-bootstrap
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish exact candidate as App PR
+    if: github.actor == 'GoodGoodJM'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the one-time bootstrap boundary
+        shell: bash
+        env:
+          EXPECTED_BRANCH: codex/agent-pr-standard-bootstrap
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_BRANCH: ${{ github.ref_name }}
+          CREATED: ${{ github.event.created }}
+        run: |
+          set -euo pipefail
+          test "$CURRENT_BRANCH" = "$EXPECTED_BRANCH"
+          test "$CREATED" = "true"
+          test "$BEFORE_SHA" = "0000000000000000000000000000000000000000"
+
+      - name: Mint a one-repository App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.COMWIT_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.COMWIT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Create and verify the App-authored PR
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          EXPECTED_SHA: f13978d0260dc8b6433846dbd7f514dad9874bcf
+          SOURCE_BRANCH: codex/agent-pr-standard
+          PR_TITLE: 'chore: establish agent PR standard'
+        run: |
+          set -euo pipefail
+
+          source_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/$SOURCE_BRANCH" --jq '.object.sha')"
+          if [[ "$source_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::Source branch moved: expected $EXPECTED_SHA, observed $source_sha."
+            exit 1
+          fi
+
+          bot_branch="automation/${SOURCE_BRANCH}-${EXPECTED_SHA:0:12}"
+          ref_error="$RUNNER_TEMP/ref.error"
+          if gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/$bot_branch" >"$RUNNER_TEMP/ref.json" 2>"$ref_error"; then
+            jq -e --arg sha "$EXPECTED_SHA" '.object.sha == $sha' "$RUNNER_TEMP/ref.json" >/dev/null
+          else
+            if ! grep -Fq '(HTTP 404)' "$ref_error"; then
+              echo "::error::Could not prove the automation branch is absent."
+              sed -n '1,3p' "$ref_error" >&2
+              exit 1
+            fi
+            gh api --method POST "/repos/$GITHUB_REPOSITORY/git/refs" \
+              --field "ref=refs/heads/$bot_branch" \
+              --field "sha=$EXPECTED_SHA" >"$RUNNER_TEMP/ref.json"
+            jq -e --arg sha "$EXPECTED_SHA" '.object.sha == $sha' "$RUNNER_TEMP/ref.json" >/dev/null
+          fi
+
+          existing_pr="$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&head=burrr-ai:$bot_branch&per_page=100" \
+            --jq 'if length == 0 then "" elif length == 1 then .[0].number else error("multiple open PRs for immutable automation branch") end')"
+          # shellcheck disable=SC2016
+          printf -v pr_body \
+            'Establish the repository guardrails for App-authored agent pull requests.\n\n---\nAgent PR provenance\n- source branch: `%s`\n- exact source SHA: `%s`\n- publisher: `burrr-ai-release-automation[bot]`\n- reviewer: `GoodGoodJM`' \
+            "$SOURCE_BRANCH" "$EXPECTED_SHA"
+
+          if [[ -z "$existing_pr" ]]; then
+            jq -n \
+              --arg title "$PR_TITLE" \
+              --arg head "$bot_branch" \
+              --arg body "$pr_body" \
+              '{title: $title, head: $head, base: "main", body: $body}' \
+              >"$RUNNER_TEMP/create-pr.json"
+            gh api --method POST "/repos/$GITHUB_REPOSITORY/pulls" \
+              --input "$RUNNER_TEMP/create-pr.json" >"$RUNNER_TEMP/pr.json"
+          else
+            gh api "/repos/$GITHUB_REPOSITORY/pulls/$existing_pr" >"$RUNNER_TEMP/pr.json"
+          fi
+
+          jq -e \
+            --arg author 'burrr-ai-release-automation[bot]' \
+            --arg head "$bot_branch" \
+            --arg sha "$EXPECTED_SHA" \
+            --arg title "$PR_TITLE" \
+            --arg body "$pr_body" \
+            'select(.state == "open" and .user.login == $author and .head.ref == $head and .head.sha == $sha and .base.ref == "main" and .title == $title and .body == $body)' \
+            "$RUNNER_TEMP/pr.json" >/dev/null
+
+          pr_number="$(jq -er '.number' "$RUNNER_TEMP/pr.json")"
+          jq -n '{reviewers: ["GoodGoodJM"]}' >"$RUNNER_TEMP/reviewers.json"
+          gh api --method POST "/repos/$GITHUB_REPOSITORY/pulls/$pr_number/requested_reviewers" \
+            --input "$RUNNER_TEMP/reviewers.json" >/dev/null
+          gh api "/repos/$GITHUB_REPOSITORY/pulls/$pr_number/requested_reviewers" \
+            --jq '.users | any(.login == "GoodGoodJM")' | grep -Fx true
+
+          pr_url="$(jq -er '.html_url' "$RUNNER_TEMP/pr.json")"
+          {
+            echo "### App-authored agent PR"
+            echo "- source: \`$SOURCE_BRANCH@$EXPECTED_SHA\`"
+            echo "- immutable PR branch: \`$bot_branch\`"
+            echo "- PR: $pr_url"
+            echo "- requested reviewer: \`GoodGoodJM\`"
+          } >>"$GITHUB_STEP_SUMMARY"
