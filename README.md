@@ -97,8 +97,9 @@ maintain persistent local environment values:
 
 The writer refuses tracked or non-gitignored files, preserves unrelated keys
 and comments, replaces the file atomically, and applies user-only permissions
-where supported. Resource commands require an explicit database or Storage ID;
-the CLI does not aggregate a project environment or select the first resource.
+where supported. Existing-resource export commands require an explicit database
+or Storage ID; create exports only the resource created by that request. The CLI
+does not aggregate a project environment or select the first resource.
 `COMWIT_PROJECT` and `COMWIT_APP` remain caller-supplied project context.
 `COMWIT_DATABASE_ID` is optional caller-supplied database context paired with
 `DATABASE_URL`; CLI resource commands do not persist that database selection.
@@ -108,6 +109,28 @@ Variables. Add `COMWIT_DATABASE_ID`, `DATABASE_URL`, and the
 `COMWIT_STORAGE_*` values as Variables only for selected resources. Store
 `COMWIT_CLOUD_TOKEN` and
 `COMWIT_DEPLOY_TOKEN` as Secrets, never as Variables.
+
+In a Comwit-managed project, resource selection and deployment-environment
+synchronization belong to the Comwit MCP tool `sync_cloud_resource_env`, not
+this standalone CLI. That tool records the selected resource binding on the
+Comwit side, reads the current Database or Storage details from the Comwit
+Cloud API, and reconciles the corresponding CG/Gitea Variables. Replacing a
+selection requires an explicit new resource ID, and the binding contract has
+no user-facing clear operation. Internal exact reconciliation still removes
+stale managed environment keys that no longer belong to the resolved binding;
+that cleanup does not clear the binding itself. When no binding exists, zero
+Cloud resources remains unset, exactly one is persisted, and multiple resources
+require an explicit selection. A stored ID is validated exactly instead of
+silently switching to another resource. The CLI does not read or write Comwit's
+binding data and does not provide a project-binding sync command.
+
+`DATABASE_URL`, the Storage endpoint and bucket, and the optional Storage
+public URL remain environment values. Templates must not hardcode them. The
+Comwit project setup flow writes the latest Cloud values into the local
+gitignored `.env` through its protected template helper; this CLI's
+`--env-out` flags remain independent utilities for direct Cloud CLI workflows.
+Before `publish_project` dispatches a deployment, the Comwit server re-fetches
+the bound Cloud details and reconciles the deployment environment again.
 
 Creating the remote resource and writing `.env` are separate steps. If a
 `databases create --env-out .env` invocation creates the database but the local

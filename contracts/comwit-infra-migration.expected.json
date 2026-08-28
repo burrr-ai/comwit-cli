@@ -1,5 +1,5 @@
 {
-  "contractId": "comwit-infra-migration-expected-v6",
+  "contractId": "comwit-infra-migration-expected-v7",
   "credentials": {
     "mcp": "COMWIT_PAT",
     "runtime": "COMWIT_CLOUD_TOKEN",
@@ -40,6 +40,28 @@
     ],
     "secretKeys": ["COMWIT_CLOUD_TOKEN", "COMWIT_DEPLOY_TOKEN"]
   },
+  "projectResourceBinding": {
+    "owner": "comwit_server",
+    "table": "comwit_cloud_resource_binding",
+    "primaryKey": "id",
+    "projectUniqueKey": "projectId",
+    "projectIdentitySource": "project.ccProjectId",
+    "nullableIds": ["ccAppId", "ccDatabaseId", "ccStorageId"],
+    "legacyAppId": {
+      "source": "project.ccAppId",
+      "mode": "unused_retained_for_future_drop",
+      "drop": "future_migration"
+    },
+    "unboundPolicy": {
+      "zero": "leave_unset",
+      "one": "persist",
+      "many": "error"
+    },
+    "storedPolicy": "validate_exact",
+    "replacePolicy": "explicit_id",
+    "clearSupported": false,
+    "cloudDetailPersistence": "none"
+  },
   "projectResourceSetup": {
     "controlPlane": "comwit_mcp",
     "listTool": "list_cloud_resources",
@@ -48,7 +70,14 @@
     "deploymentSyncTool": "sync_cloud_resource_env",
     "localEnvWriter": ".agents/scripts/sync-resource-env.mjs",
     "manualEnvEditing": false,
-    "resourceCliRequired": false
+    "resourceCliRequired": false,
+    "staleManagedEnvironmentRemoval": true,
+    "syncEffects": [
+      "persist_binding",
+      "fetch_latest_cloud_detail",
+      "upsert_cg_gitea_environment"
+    ],
+    "deploymentReconcileBeforePublish": true
   },
   "ports": {
     "projectToken": {
@@ -92,7 +121,6 @@
         "available_to_actions",
         "masked",
         "rotatable",
-        "deletable",
         "retryable"
       ]
     },

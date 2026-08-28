@@ -34,7 +34,7 @@ const optionalResourceKeys = [
 ];
 
 if (
-  expectedContract.contractId !== "comwit-infra-migration-expected-v6" ||
+  expectedContract.contractId !== "comwit-infra-migration-expected-v7" ||
   expectedContract.template !== undefined ||
   Object.keys(expectedContract.credentials ?? {}).length !== 3 ||
   expectedContract.credentials?.mcp !== "COMWIT_PAT" ||
@@ -78,6 +78,32 @@ if (
     "COMWIT_CLOUD_TOKEN",
     "COMWIT_DEPLOY_TOKEN",
   ]) ||
+  expectedContract.projectResourceBinding?.owner !== "comwit_server" ||
+  expectedContract.projectResourceBinding?.table !==
+    "comwit_cloud_resource_binding" ||
+  expectedContract.projectResourceBinding?.primaryKey !== "id" ||
+  expectedContract.projectResourceBinding?.projectUniqueKey !== "projectId" ||
+  expectedContract.projectResourceBinding?.projectIdentitySource !==
+    "project.ccProjectId" ||
+  !hasExactItems(expectedContract.projectResourceBinding?.nullableIds, [
+    "ccAppId",
+    "ccDatabaseId",
+    "ccStorageId",
+  ]) ||
+  expectedContract.projectResourceBinding?.legacyAppId?.source !==
+    "project.ccAppId" ||
+  expectedContract.projectResourceBinding?.legacyAppId?.mode !==
+    "unused_retained_for_future_drop" ||
+  expectedContract.projectResourceBinding?.legacyAppId?.drop !==
+    "future_migration" ||
+  expectedContract.projectResourceBinding?.unboundPolicy?.zero !==
+    "leave_unset" ||
+  expectedContract.projectResourceBinding?.unboundPolicy?.one !== "persist" ||
+  expectedContract.projectResourceBinding?.unboundPolicy?.many !== "error" ||
+  expectedContract.projectResourceBinding?.storedPolicy !== "validate_exact" ||
+  expectedContract.projectResourceBinding?.replacePolicy !== "explicit_id" ||
+  expectedContract.projectResourceBinding?.clearSupported !== false ||
+  expectedContract.projectResourceBinding?.cloudDetailPersistence !== "none" ||
   expectedContract.projectResourceSetup?.controlPlane !== "comwit_mcp" ||
   expectedContract.projectResourceSetup?.listTool !== "list_cloud_resources" ||
   expectedContract.projectResourceSetup?.createDatabaseTool !==
@@ -90,6 +116,15 @@ if (
     ".agents/scripts/sync-resource-env.mjs" ||
   expectedContract.projectResourceSetup?.manualEnvEditing !== false ||
   expectedContract.projectResourceSetup?.resourceCliRequired !== false ||
+  expectedContract.projectResourceSetup?.staleManagedEnvironmentRemoval !==
+    true ||
+  !hasExactItems(expectedContract.projectResourceSetup?.syncEffects, [
+    "persist_binding",
+    "fetch_latest_cloud_detail",
+    "upsert_cg_gitea_environment",
+  ]) ||
+  expectedContract.projectResourceSetup?.deploymentReconcileBeforePublish !==
+    true ||
   expectedContract.ports?.cgRouting !== undefined ||
   expectedContract.ports?.cgSessionTemplateSelection?.status !==
     "pending_external_contract" ||
@@ -129,7 +164,6 @@ if (
       "available_to_actions",
       "masked",
       "rotatable",
-      "deletable",
       "retryable",
     ],
   ) ||
