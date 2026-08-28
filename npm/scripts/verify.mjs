@@ -34,7 +34,7 @@ const optionalResourceKeys = [
 ];
 
 if (
-  expectedContract.contractId !== "comwit-infra-migration-expected-v7" ||
+  expectedContract.contractId !== "comwit-infra-migration-expected-v8" ||
   expectedContract.template !== undefined ||
   Object.keys(expectedContract.credentials ?? {}).length !== 3 ||
   expectedContract.credentials?.mcp !== "COMWIT_PAT" ||
@@ -101,21 +101,25 @@ if (
   expectedContract.projectResourceBinding?.unboundPolicy?.one !== "persist" ||
   expectedContract.projectResourceBinding?.unboundPolicy?.many !== "error" ||
   expectedContract.projectResourceBinding?.storedPolicy !== "validate_exact" ||
-  expectedContract.projectResourceBinding?.replacePolicy !== "explicit_id" ||
+  expectedContract.projectResourceBinding?.replacePolicy !== "not_supported" ||
+  expectedContract.projectResourceBinding?.selectionSurface !== "none" ||
   expectedContract.projectResourceBinding?.clearSupported !== false ||
   expectedContract.projectResourceBinding?.cloudDetailPersistence !== "none" ||
-  expectedContract.projectResourceSetup?.controlPlane !== "comwit_mcp" ||
-  expectedContract.projectResourceSetup?.listTool !== "list_cloud_resources" ||
-  expectedContract.projectResourceSetup?.createDatabaseTool !==
-    "create_cloud_database" ||
-  expectedContract.projectResourceSetup?.createStorageTool !==
-    "create_cloud_storage" ||
-  expectedContract.projectResourceSetup?.deploymentSyncTool !==
-    "sync_cloud_resource_env" ||
-  expectedContract.projectResourceSetup?.localEnvWriter !==
+  expectedContract.projectResourceSetup?.controlPlane !== "comwit_cli" ||
+  expectedContract.projectResourceSetup?.diagnosticMcpListTool !==
+    "list_cloud_resources" ||
+  !hasExactItems(
+    expectedContract.projectResourceSetup?.publicMcpMutationTools,
+    [],
+  ) ||
+  expectedContract.projectResourceSetup?.deploymentReconcileControlPlane !==
+    "comwit_server_publish" ||
+  expectedContract.projectResourceSetup?.projectHandoffEnvWriter !==
     ".agents/scripts/sync-resource-env.mjs" ||
+  expectedContract.projectResourceSetup?.resourceEnvWriter !==
+    "comwit_cli_env_out" ||
   expectedContract.projectResourceSetup?.manualEnvEditing !== false ||
-  expectedContract.projectResourceSetup?.resourceCliRequired !== false ||
+  expectedContract.projectResourceSetup?.resourceCliRequired !== true ||
   expectedContract.projectResourceSetup?.staleManagedEnvironmentRemoval !==
     true ||
   !hasExactItems(expectedContract.projectResourceSetup?.syncEffects, [
@@ -179,7 +183,6 @@ if (
   ]) ||
   !hasExactItems(expectedContract.pendingErrorCodes, [
     "comwit_cloud_project_token_scopes",
-    "comwit_cloud_database_server_create_auth",
     "cg_template_selection",
     "cg_environment_secret_upsert",
     "database_comwit_token_auth",

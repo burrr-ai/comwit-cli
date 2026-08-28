@@ -1,5 +1,5 @@
 {
-  "contractId": "comwit-infra-migration-expected-v7",
+  "contractId": "comwit-infra-migration-expected-v8",
   "credentials": {
     "mcp": "COMWIT_PAT",
     "runtime": "COMWIT_CLOUD_TOKEN",
@@ -58,19 +58,20 @@
       "many": "error"
     },
     "storedPolicy": "validate_exact",
-    "replacePolicy": "explicit_id",
+    "replacePolicy": "not_supported",
+    "selectionSurface": "none",
     "clearSupported": false,
     "cloudDetailPersistence": "none"
   },
   "projectResourceSetup": {
-    "controlPlane": "comwit_mcp",
-    "listTool": "list_cloud_resources",
-    "createDatabaseTool": "create_cloud_database",
-    "createStorageTool": "create_cloud_storage",
-    "deploymentSyncTool": "sync_cloud_resource_env",
-    "localEnvWriter": ".agents/scripts/sync-resource-env.mjs",
+    "controlPlane": "comwit_cli",
+    "diagnosticMcpListTool": "list_cloud_resources",
+    "publicMcpMutationTools": [],
+    "deploymentReconcileControlPlane": "comwit_server_publish",
+    "projectHandoffEnvWriter": ".agents/scripts/sync-resource-env.mjs",
+    "resourceEnvWriter": "comwit_cli_env_out",
     "manualEnvEditing": false,
-    "resourceCliRequired": false,
+    "resourceCliRequired": true,
     "staleManagedEnvironmentRemoval": true,
     "syncEffects": [
       "persist_binding",
@@ -139,7 +140,6 @@
   "runtimeErrorCodes": ["comwit_cloud_resource_binding_selection"],
   "pendingErrorCodes": [
     "comwit_cloud_project_token_scopes",
-    "comwit_cloud_database_server_create_auth",
     "cg_template_selection",
     "cg_environment_secret_upsert",
     "database_comwit_token_auth",

@@ -18,6 +18,7 @@ const (
 	envProjectKey          = "COMWIT_PROJECT"
 	envAppKey              = "COMWIT_APP"
 	envCloudTokenKey       = "COMWIT_CLOUD_TOKEN"
+	envDatabaseIDKey       = "COMWIT_DATABASE_ID"
 	envDatabaseURLKey      = "DATABASE_URL"
 	envStorageIDKey        = "COMWIT_STORAGE_ID"
 	envStorageEndpointKey  = "COMWIT_STORAGE_ENDPOINT"
@@ -32,11 +33,11 @@ type envUpdate struct {
 	Value string
 }
 
-// cwdDotEnvIdentifier deliberately permits only the non-secret project and App
+// cwdDotEnvIdentifier deliberately permits only non-secret context and resource
 // identifiers. In particular, command context resolution must never load the
 // COMWIT_CLOUD_TOKEN value from a project file.
 func cwdDotEnvIdentifier(key string) (string, error) {
-	if key != envProjectKey && key != envAppKey {
+	if key != envProjectKey && key != envAppKey && key != envDatabaseIDKey && key != envStorageIDKey {
 		return "", nil
 	}
 	cwd, err := os.Getwd()
@@ -55,6 +56,16 @@ func cwdDotEnvIdentifier(key string) (string, error) {
 		return "", fmt.Errorf("read .env context: %w", err)
 	}
 	return strings.TrimSpace(value), nil
+}
+
+func selectStoredResourceIdentifier(explicit, key string) (string, error) {
+	if key != envDatabaseIDKey && key != envStorageIDKey {
+		return "", fmt.Errorf("unsupported stored resource identifier %s", key)
+	}
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
+		return explicit, nil
+	}
+	return cwdDotEnvIdentifier(key)
 }
 
 func readDotEnvValue(path, wantedKey string) (string, error) {
@@ -342,6 +353,19 @@ func writeEnvUpdates(path string, updates ...envUpdate) ([]string, error) {
 		return nil, fmt.Errorf("write env output: %w", err)
 	}
 	return keys, nil
+}
+
+func writeDatabaseEnv(path, databaseID, databaseURL string) ([]string, error) {
+	databaseID = strings.TrimSpace(databaseID)
+	databaseURL = strings.TrimSpace(databaseURL)
+	if databaseID == "" || databaseURL == "" {
+		return nil, errors.New("database response is missing database_id or database_url")
+	}
+	return writeEnvUpdates(
+		path,
+		envUpdate{Key: envDatabaseIDKey, Value: databaseID},
+		envUpdate{Key: envDatabaseURLKey, Value: databaseURL},
+	)
 }
 
 func printUpdatedEnvKeys(stdout io.Writer, keys []string) {

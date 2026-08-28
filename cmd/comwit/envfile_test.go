@@ -14,12 +14,14 @@ import (
 	"time"
 )
 
-func TestProjectAndAppResolutionPriorityIncludesDotEnv(t *testing.T) {
+func TestContextAndStoredResourceResolutionPriorityIncludesDotEnv(t *testing.T) {
 	dir := initGitEnvRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(strings.Join([]string{
-		"COMWIT_CLOUD_TOKEN=cwt_must_not_be_loaded",
+		"COMWIT_CLOUD_TOKEN='malformed-and-must-not-be-read",
 		"COMWIT_PROJECT=from-dotenv",
 		"COMWIT_APP='app-from-dotenv' # project app",
+		"COMWIT_DATABASE_ID=db-from-dotenv",
+		"COMWIT_STORAGE_ID=stg-from-dotenv",
 		"",
 	}, "\n")), 0o600); err != nil {
 		t.Fatal(err)
@@ -27,6 +29,8 @@ func TestProjectAndAppResolutionPriorityIncludesDotEnv(t *testing.T) {
 	t.Chdir(dir)
 	t.Setenv("COMWIT_PROJECT", "")
 	t.Setenv("COMWIT_APP", "")
+	t.Setenv("COMWIT_DATABASE_ID", "")
+	t.Setenv("COMWIT_STORAGE_ID", "")
 
 	cfg := configFile{DefaultProject: "from-config"}
 	if got, err := selectProject("from-flag", cfg); err != nil || got != "from-flag" {
@@ -38,17 +42,60 @@ func TestProjectAndAppResolutionPriorityIncludesDotEnv(t *testing.T) {
 	if got, err := selectApp(""); err != nil || got != "app-from-dotenv" {
 		t.Fatalf("dotenv app = %q, err = %v", got, err)
 	}
+	if got, err := selectStoredResourceIdentifier("db-from-flag", envDatabaseIDKey); err != nil || got != "db-from-flag" {
+		t.Fatalf("flag database = %q, err = %v", got, err)
+	}
+	if got, err := selectStoredResourceIdentifier("stg-from-flag", envStorageIDKey); err != nil || got != "stg-from-flag" {
+		t.Fatalf("flag Storage = %q, err = %v", got, err)
+	}
+	if got, err := selectStoredResourceIdentifier("", envDatabaseIDKey); err != nil || got != "db-from-dotenv" {
+		t.Fatalf("dotenv database = %q, err = %v", got, err)
+	}
+	if got, err := selectStoredResourceIdentifier("", envStorageIDKey); err != nil || got != "stg-from-dotenv" {
+		t.Fatalf("dotenv Storage = %q, err = %v", got, err)
+	}
 	if got, err := cwdDotEnvIdentifier(envCloudTokenKey); err != nil || got != "" {
 		t.Fatalf("secret resolver returned %q, err = %v", got, err)
+	}
+	if got, err := selectStoredResourceIdentifier("", envCloudTokenKey); err == nil || got != "" {
+		t.Fatalf("stored resource resolver accepted token key: %q, err = %v", got, err)
 	}
 
 	t.Setenv("COMWIT_PROJECT", "from-shell")
 	t.Setenv("COMWIT_APP", "app-from-shell")
+	t.Setenv("COMWIT_DATABASE_ID", "db-from-shell")
+	t.Setenv("COMWIT_STORAGE_ID", "stg-from-shell")
 	if got, err := selectProject("", cfg); err != nil || got != "from-shell" {
 		t.Fatalf("shell project = %q, err = %v", got, err)
 	}
 	if got, err := selectApp(""); err != nil || got != "app-from-shell" {
 		t.Fatalf("shell app = %q, err = %v", got, err)
+	}
+	if got, err := selectStoredResourceIdentifier("db-explicit", envDatabaseIDKey); err != nil || got != "db-explicit" {
+		t.Fatalf("explicit database override = %q, err = %v", got, err)
+	}
+	if got, err := selectStoredResourceIdentifier("stg-explicit", envStorageIDKey); err != nil || got != "stg-explicit" {
+		t.Fatalf("explicit Storage override = %q, err = %v", got, err)
+	}
+	if got, err := selectStoredResourceIdentifier("", envDatabaseIDKey); err != nil || got != "db-from-dotenv" {
+		t.Fatalf("stale shell database overrode cwd binding: %q, err = %v", got, err)
+	}
+	if got, err := selectStoredResourceIdentifier("", envStorageIDKey); err != nil || got != "stg-from-dotenv" {
+		t.Fatalf("stale shell Storage overrode cwd binding: %q, err = %v", got, err)
+	}
+}
+
+func TestStoredResourceIdentifierIgnoresShellWithoutDotEnv(t *testing.T) {
+	dir := initGitEnvRepo(t)
+	t.Chdir(dir)
+	t.Setenv("COMWIT_DATABASE_ID", "db-stale-shell")
+	t.Setenv("COMWIT_STORAGE_ID", "stg-stale-shell")
+
+	if got, err := selectStoredResourceIdentifier("", envDatabaseIDKey); err != nil || got != "" {
+		t.Fatalf("database = %q, err = %v", got, err)
+	}
+	if got, err := selectStoredResourceIdentifier("", envStorageIDKey); err != nil || got != "" {
+		t.Fatalf("Storage = %q, err = %v", got, err)
 	}
 }
 
@@ -180,6 +227,52 @@ func TestDotEnvContextRejectsSymlink(t *testing.T) {
 	if got, err := selectProject("", configFile{DefaultProject: "must-not-fallback"}); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("project = %q, err = %v", got, err)
 	}
+}
+
+func TestStoredResourceDotEnvRejectsTrackedMalformedAndSymlink(t *testing.T) {
+	t.Run("tracked", func(t *testing.T) {
+		dir := initGitEnvRepo(t)
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_DATABASE_ID=db_tracked\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, dir, "add", "-f", ".env")
+		t.Chdir(dir)
+		t.Setenv("COMWIT_DATABASE_ID", "db-stale-shell")
+		if got, err := selectStoredResourceIdentifier("", envDatabaseIDKey); err == nil || !strings.Contains(err.Error(), "tracked") {
+			t.Fatalf("database = %q, err = %v", got, err)
+		}
+	})
+
+	t.Run("malformed", func(t *testing.T) {
+		dir := initGitEnvRepo(t)
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_DATABASE_ID='unterminated\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		t.Setenv("COMWIT_DATABASE_ID", "")
+		if got, err := selectStoredResourceIdentifier("", envDatabaseIDKey); err == nil || !strings.Contains(err.Error(), "parse COMWIT_DATABASE_ID") {
+			t.Fatalf("database = %q, err = %v", got, err)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := initGitEnvRepo(t)
+		realPath := filepath.Join(dir, "real.env")
+		if err := os.WriteFile(realPath, []byte("COMWIT_STORAGE_ID=stg_symlinked\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(realPath, filepath.Join(dir, ".env")); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		t.Setenv("COMWIT_STORAGE_ID", "")
+		if got, err := selectStoredResourceIdentifier("", envStorageIDKey); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("Storage = %q, err = %v", got, err)
+		}
+	})
 }
 
 func TestDotEnvAppContextRejectsDuplicateTarget(t *testing.T) {
@@ -338,14 +431,15 @@ func TestEnvWriterRefusesTrackedUnignoredAndSymlinkTargets(t *testing.T) {
 	}
 }
 
-func TestDatabaseCreateAndConfigureWriteConcreteURL(t *testing.T) {
+func TestDatabaseCreateAndConfigureWriteCompleteEnvironmentPair(t *testing.T) {
 	dir := initGitEnvRepo(t)
 	t.Chdir(dir)
 	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	t.Setenv("COMWIT_DATABASE_ID", "db_stale_shell")
 	if _, err := saveConfig(configFile{Token: "cwt_test"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("# keep\nCOMWIT_PROJECT=proj_1\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("# keep\nCOMWIT_PROJECT=proj_1\nCOMWIT_DATABASE_ID=db_stale\nDATABASE_URL=libsql://stale\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -373,24 +467,37 @@ func TestDatabaseCreateAndConfigureWriteConcreteURL(t *testing.T) {
 	if strings.Contains(stdout.String(), "legacy-one-time") || strings.Contains(stdout.String(), "database_token") {
 		t.Fatalf("env-out stdout exposed legacy database token: %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "updated_env\tCOMWIT_DATABASE_ID") || !strings.Contains(stdout.String(), "updated_env\tDATABASE_URL") {
+		t.Fatalf("create stdout did not report the complete database pair: %q", stdout.String())
+	}
 	data, err := os.ReadFile(filepath.Join(dir, ".env"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "DATABASE_URL=libsql://db.example.test/db_1") || strings.Contains(string(data), "legacy-one-time") {
+	if strings.Count(string(data), "COMWIT_DATABASE_ID=") != 1 ||
+		strings.Count(string(data), "DATABASE_URL=") != 1 ||
+		!strings.Contains(string(data), "COMWIT_DATABASE_ID=db_1") ||
+		!strings.Contains(string(data), "DATABASE_URL=libsql://db.example.test/db_1") ||
+		strings.Contains(string(data), "legacy-one-time") {
 		t.Fatalf("create env = %q", data)
 	}
 
 	stdout.Reset()
-	if err := run([]string{"databases", "configure", "--database", "db_1", "--env-out", ".env"}, &stdout, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"databases", "configure", "--env-out", ".env"}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	data, err = os.ReadFile(filepath.Join(dir, ".env"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(data), "DATABASE_URL=") != 1 || !strings.Contains(string(data), "DATABASE_URL=libsql://db.example.test/db_1-new") {
+	if strings.Count(string(data), "COMWIT_DATABASE_ID=") != 1 ||
+		strings.Count(string(data), "DATABASE_URL=") != 1 ||
+		!strings.Contains(string(data), "COMWIT_DATABASE_ID=db_1") ||
+		!strings.Contains(string(data), "DATABASE_URL=libsql://db.example.test/db_1-new") {
 		t.Fatalf("configure env = %q", data)
+	}
+	if !strings.Contains(stdout.String(), "updated_env\tCOMWIT_DATABASE_ID") || !strings.Contains(stdout.String(), "updated_env\tDATABASE_URL") {
+		t.Fatalf("configure stdout did not report the complete database pair: %q", stdout.String())
 	}
 	if !strings.Contains(string(data), "# keep") {
 		t.Fatalf("comment lost: %q", data)
@@ -402,6 +509,201 @@ func TestDatabaseCreateAndConfigureWriteConcreteURL(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "token\tlegacy-one-time") {
 		t.Fatalf("legacy create stdout no longer includes its one-time token: %q", stdout.String())
+	}
+}
+
+func TestDatabaseConfigureStopsOnMissingOrUnknownStoredIdentifier(t *testing.T) {
+	t.Run("missing id", func(t *testing.T) {
+		dir := initGitEnvRepo(t)
+		t.Chdir(dir)
+		t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+		t.Setenv("COMWIT_DATABASE_ID", "db_stale_shell")
+		if _, err := saveConfig(configFile{Token: "cwt_test"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT=proj_1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			w.WriteHeader(http.StatusTeapot)
+		}))
+		defer server.Close()
+		t.Setenv("COMWIT_API_URL", server.URL)
+
+		err := run([]string{"databases", "configure", "--env-out", ".env"}, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--database is required") {
+			t.Fatalf("error = %v", err)
+		}
+		if requests != 0 {
+			t.Fatalf("missing database id sent %d requests", requests)
+		}
+	})
+
+	t.Run("stored id absent from Cloud", func(t *testing.T) {
+		dir := initGitEnvRepo(t)
+		t.Chdir(dir)
+		t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+		t.Setenv("COMWIT_DATABASE_ID", "db_stale_shell")
+		if _, err := saveConfig(configFile{Token: "cwt_test"}); err != nil {
+			t.Fatal(err)
+		}
+		original := "COMWIT_PROJECT=proj_1\nCOMWIT_DATABASE_ID=db_missing\nDATABASE_URL=libsql://stale\n"
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(original), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/proj_1/databases" {
+				t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"databases":[{"database_id":"db_other","name":"other","database_url":"libsql://other","status":"ready"}]}`))
+		}))
+		defer server.Close()
+		t.Setenv("COMWIT_API_URL", server.URL)
+
+		err := run([]string{"databases", "configure", "--env-out", ".env"}, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "database db_missing was not found") {
+			t.Fatalf("error = %v", err)
+		}
+		data, readErr := os.ReadFile(filepath.Join(dir, ".env"))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if got := string(data); got != original {
+			t.Fatalf("unknown stored id changed env: %q", got)
+		}
+	})
+}
+
+func TestWriteDatabaseEnvRejectsIncompletePairWithoutChangingFile(t *testing.T) {
+	dir := initGitEnvRepo(t)
+	path := filepath.Join(dir, ".env")
+	original := "COMWIT_DATABASE_ID=db_existing\nDATABASE_URL=libsql://existing\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name        string
+		databaseID  string
+		databaseURL string
+	}{
+		{name: "missing id", databaseURL: "libsql://new"},
+		{name: "missing url", databaseID: "db_new"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := writeDatabaseEnv(path, test.databaseID, test.databaseURL); err == nil || !strings.Contains(err.Error(), "database_id or database_url") {
+				t.Fatalf("error = %v", err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(data); got != original {
+				t.Fatalf("incomplete pair changed env: %q", got)
+			}
+		})
+	}
+}
+
+func TestDatabaseCreateIncompletePairDoesNotExposeTokenOrChangeEnv(t *testing.T) {
+	dir := initGitEnvRepo(t)
+	t.Chdir(dir)
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := saveConfig(configFile{Token: "cwt_test"}); err != nil {
+		t.Fatal(err)
+	}
+	original := "COMWIT_PROJECT=proj_1\nCOMWIT_DATABASE_ID=db_existing\nDATABASE_URL=libsql://existing\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/projects/proj_1/databases" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"database_url":"libsql://new","created":true,"database_token":"must-not-leak"}`))
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{"databases", "create", "--name", "app", "--env-out", ".env"}, &stdout, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "database_id or database_url") {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(stdout.String(), "must-not-leak") || strings.Contains(stdout.String(), "database_token") {
+		t.Fatalf("stdout exposed database token: %q", stdout.String())
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, ".env"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := string(data); got != original {
+		t.Fatalf("incomplete create response changed env: %q", got)
+	}
+}
+
+func TestResourceEnvOutHelpCapabilities(t *testing.T) {
+	tests := []struct {
+		name             string
+		command          []string
+		envKeys          string
+		resourceIDSource bool
+	}{
+		{
+			name:    "database create",
+			command: []string{"databases", "create"},
+			envKeys: "COMWIT_DATABASE_ID,DATABASE_URL",
+		},
+		{
+			name:             "database configure",
+			command:          []string{"databases", "configure"},
+			envKeys:          "COMWIT_DATABASE_ID,DATABASE_URL",
+			resourceIDSource: true,
+		},
+		{
+			name:    "storage create",
+			command: []string{"storage", "create"},
+			envKeys: "COMWIT_STORAGE_ID,COMWIT_STORAGE_ENDPOINT,COMWIT_STORAGE_BUCKET,COMWIT_STORAGE_PUBLIC_BASE_URL",
+		},
+		{
+			name:             "storage get",
+			command:          []string{"storage", "get"},
+			envKeys:          "COMWIT_STORAGE_ID,COMWIT_STORAGE_ENDPOINT,COMWIT_STORAGE_BUCKET,COMWIT_STORAGE_PUBLIC_BASE_URL",
+			resourceIDSource: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			helpArgs := append(append([]string{}, test.command...), "--help")
+			if err := run(helpArgs, &stdout, &bytes.Buffer{}); err != nil {
+				t.Fatalf("help error = %v", err)
+			}
+			output := stdout.String()
+			if !strings.Contains(output, "env-out") || !strings.Contains(output, test.envKeys) {
+				t.Fatalf("help missing env-out contract %q: %q", test.envKeys, output)
+			}
+			markerCount := strings.Count(output, "resource-id-source: explicit,cwd-env")
+			if test.resourceIDSource && markerCount != 1 {
+				t.Fatalf("help marker count = %d, output = %q", markerCount, output)
+			}
+			if !test.resourceIDSource && markerCount != 0 {
+				t.Fatalf("create help unexpectedly exposed resource id marker: %q", output)
+			}
+
+			stdout.Reset()
+			unknownArgs := append(append([]string{}, test.command...), "--definitely-unknown")
+			err := run(unknownArgs, &stdout, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+				t.Fatalf("unknown flag error = %v", err)
+			}
+		})
 	}
 }
 

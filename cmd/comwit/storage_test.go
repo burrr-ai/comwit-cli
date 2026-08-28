@@ -83,10 +83,11 @@ func TestStorageGetWritesConnectionEnvironment(t *testing.T) {
 	dir := initGitEnvRepo(t)
 	t.Chdir(dir)
 	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	t.Setenv("COMWIT_STORAGE_ID", "stg_stale_shell")
 	if _, err := saveConfig(configFile{Token: "cwt_test"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT=proj_1\nUNRELATED=keep\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMWIT_PROJECT=proj_1\nCOMWIT_STORAGE_ID=stg_1\nUNRELATED=keep\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -101,7 +102,7 @@ func TestStorageGetWritesConnectionEnvironment(t *testing.T) {
 	t.Setenv("COMWIT_API_URL", server.URL)
 
 	var stdout bytes.Buffer
-	if err := run([]string{"storage", "get", "--storage", "stg_1", "--env-out", ".env"}, &stdout, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"storage", "get", "--env-out", ".env"}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, ".env"))
@@ -126,7 +127,9 @@ func TestStorageGetWritesConnectionEnvironment(t *testing.T) {
 }
 
 func TestStorageCommandsValidateRequiredArguments(t *testing.T) {
+	t.Chdir(initGitEnvRepo(t))
 	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("COMWIT_STORAGE_ID", "stg-stale-shell")
 	if err := run([]string{"storage", "create", "--name", "bucket"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "--project is required") {
 		t.Fatalf("err=%v", err)
 	}
@@ -135,6 +138,42 @@ func TestStorageCommandsValidateRequiredArguments(t *testing.T) {
 	}
 	if err := run([]string{"storage", "get"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "--storage is required") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestStorageGetStopsWhenStoredIdentifierIsAbsentFromCloud(t *testing.T) {
+	dir := initGitEnvRepo(t)
+	t.Chdir(dir)
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	t.Setenv("COMWIT_STORAGE_ID", "stg_stale_shell")
+	if _, err := saveConfig(configFile{Token: "cwt_test"}); err != nil {
+		t.Fatal(err)
+	}
+	original := "COMWIT_PROJECT=proj_1\nCOMWIT_STORAGE_ID=stg_missing\nCOMWIT_STORAGE_ENDPOINT=https://storage.cloud.comwit.io\nCOMWIT_STORAGE_BUCKET=stale\nCOMWIT_STORAGE_PUBLIC_BASE_URL=\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/proj_1/storages/stg_missing" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":"storage_not_found"}`))
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	err := run([]string{"storage", "get", "--env-out", ".env"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "API HTTP 404") {
+		t.Fatalf("error = %v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, ".env"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := string(data); got != original {
+		t.Fatalf("unknown stored id changed env: %q", got)
 	}
 }
 

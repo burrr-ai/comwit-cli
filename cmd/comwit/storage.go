@@ -60,19 +60,23 @@ func storageUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   comwit storage create --project <id> --name <bucket-name> [--public] [--location-hint apac] [--env-out .env]
   comwit storage list --project <id>
-  comwit storage get --project <id> --storage <id> [--env-out .env]
+  comwit storage get --project <id> [--storage <id>] [--env-out .env]
   comwit storage public <enable|disable> --project <id> --storage <id>
   comwit storage delete --project <id> --storage <id>`)
 }
 
 func storageCreateCommand(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("storage create", flag.ContinueOnError)
+	fs.SetOutput(stdout)
 	project := fs.String("project", "", "project id")
 	name := fs.String("name", "", "globally unique Storage/bucket name")
 	public := fs.Bool("public", false, "enable the default public domain")
 	location := fs.String("location-hint", "apac", "R2 placement hint")
-	envOut := fs.String("env-out", "", "gitignored .env file to update")
+	envOut := fs.String("env-out", "", "gitignored .env file to atomically update (keys: COMWIT_STORAGE_ID,COMWIT_STORAGE_ENDPOINT,COMWIT_STORAGE_BUCKET,COMWIT_STORAGE_PUBLIC_BASE_URL)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	cfg, err := loadConfig()
@@ -137,17 +141,26 @@ func storageListCommand(args []string, stdout io.Writer) error {
 
 func storageGetCommand(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("storage get", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	fs.Usage = func() {
+		fmt.Fprintln(stdout, "Usage of storage get:")
+		fmt.Fprintln(stdout, "resource-id-source: explicit,cwd-env")
+		fs.PrintDefaults()
+	}
 	project := fs.String("project", "", "project id")
-	storageID := fs.String("storage", "", "Storage id")
-	envOut := fs.String("env-out", "", "gitignored .env file to update")
+	storageID := fs.String("storage", "", "Storage id; defaults to COMWIT_STORAGE_ID in safe cwd .env")
+	envOut := fs.String("env-out", "", "gitignored .env file to atomically update (keys: COMWIT_STORAGE_ID,COMWIT_STORAGE_ENDPOINT,COMWIT_STORAGE_BUCKET,COMWIT_STORAGE_PUBLIC_BASE_URL)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	target, err := prepareEnvOutput(*envOut)
 	if err != nil {
 		return err
 	}
-	cfg, projectID, id, err := storageCommandContext(*project, *storageID)
+	cfg, projectID, id, err := storageGetCommandContext(*project, *storageID)
 	if err != nil {
 		return err
 	}
@@ -223,6 +236,28 @@ func storageCommandContext(project, id string) (configFile, string, string, erro
 	storageID := strings.TrimSpace(id)
 	if storageID == "" {
 		return configFile{}, "", "", errors.New("--storage is required")
+	}
+	return cfg, projectID, storageID, nil
+}
+
+func storageGetCommandContext(project, id string) (configFile, string, string, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return configFile{}, "", "", err
+	}
+	projectID, err := selectProject(project, cfg)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
+	if projectID == "" {
+		return configFile{}, "", "", errors.New("--project is required")
+	}
+	storageID, err := selectStoredResourceIdentifier(id, envStorageIDKey)
+	if err != nil {
+		return configFile{}, "", "", err
+	}
+	if storageID == "" {
+		return configFile{}, "", "", errors.New("--storage is required (or set COMWIT_STORAGE_ID in safe cwd gitignored .env)")
 	}
 	return cfg, projectID, storageID, nil
 }

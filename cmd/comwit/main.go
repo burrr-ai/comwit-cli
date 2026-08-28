@@ -326,7 +326,7 @@ func usage(w io.Writer) {
   comwit auth export-token --env-out .env
   comwit projects list
   comwit databases create --project <id> --name <name> [--env-out .env]
-  comwit databases configure --project <id> --database <id> --env-out .env
+  comwit databases configure --project <id> [--database <id>] --env-out .env
   comwit databases import-dump --project <id> --name <name> --from-dump dump.sql [--keep-failed-db]
   comwit databases list --project <id>
   comwit databases execute --project <id> --database <id> (--command <sql>|--file <path>) [--json]
@@ -348,7 +348,7 @@ func usage(w io.Writer) {
   comwit domains records delete --project <id> --domain example.com --record <id>
   comwit storage create --project <id> --name <bucket-name> [--public] [--location-hint apac] [--env-out .env]
   comwit storage list --project <id>
-  comwit storage get --project <id> --storage <id> [--env-out .env]
+  comwit storage get --project <id> [--storage <id>] [--env-out .env]
   comwit storage public <enable|disable> --project <id> --storage <id>
   comwit storage delete --project <id> --storage <id>
   comwit apps list --project <id>
@@ -780,10 +780,14 @@ func databases(args []string, stdout io.Writer) error {
 	switch args[0] {
 	case "create":
 		fs := flag.NewFlagSet("databases create", flag.ContinueOnError)
+		fs.SetOutput(stdout)
 		project := fs.String("project", "", "project id")
 		name := fs.String("name", "", "database name")
-		envOut := fs.String("env-out", "", "gitignored .env file to update")
+		envOut := fs.String("env-out", "", "gitignored .env file to atomically update (keys: COMWIT_DATABASE_ID,DATABASE_URL)")
 		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
 			return err
 		}
 		cfg, err := loadConfig()
@@ -815,10 +819,7 @@ func databases(args []string, stdout io.Writer) error {
 			fmt.Fprintf(stdout, "token\t%s\n", *body.DatabaseToken)
 		}
 		if target != "" {
-			if strings.TrimSpace(body.DatabaseURL) == "" {
-				return errors.New("database was created but the API response did not include database_url")
-			}
-			keys, err := writeEnvUpdates(target, envUpdate{Key: envDatabaseURLKey, Value: body.DatabaseURL})
+			keys, err := writeDatabaseEnv(target, body.DatabaseID, body.DatabaseURL)
 			if err != nil {
 				return fmt.Errorf("database was created but env output failed: %w", err)
 			}
@@ -915,22 +916,45 @@ func databaseTokenCommand(args []string, stdout io.Writer) error {
 
 func databaseConfigureCommand(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("databases configure", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	fs.Usage = func() {
+		fmt.Fprintln(stdout, "Usage of databases configure:")
+		fmt.Fprintln(stdout, "resource-id-source: explicit,cwd-env")
+		fs.PrintDefaults()
+	}
 	project := fs.String("project", "", "project id")
-	database := fs.String("database", "", "database id")
-	envOut := fs.String("env-out", "", "gitignored .env file to update")
+	database := fs.String("database", "", "database id; defaults to COMWIT_DATABASE_ID in safe cwd .env")
+	envOut := fs.String("env-out", "", "gitignored .env file to atomically update (keys: COMWIT_DATABASE_ID,DATABASE_URL)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if fs.NArg() != 0 || strings.TrimSpace(*envOut) == "" {
-		return errors.New("usage: comwit databases configure --project <id> --database <id> --env-out .env")
+		return errors.New("usage: comwit databases configure --project <id> [--database <id>] --env-out .env")
 	}
 	target, err := prepareEnvOutput(*envOut)
 	if err != nil {
 		return err
 	}
-	cfg, projectID, databaseID, err := databaseCommandContext(*project, *database)
+	cfg, err := loadConfig()
 	if err != nil {
 		return err
+	}
+	projectID, err := selectProject(*project, cfg)
+	if err != nil {
+		return err
+	}
+	if projectID == "" {
+		return errors.New("--project is required")
+	}
+	databaseID, err := selectStoredResourceIdentifier(*database, envDatabaseIDKey)
+	if err != nil {
+		return err
+	}
+	if databaseID == "" {
+		return errors.New("--database is required (or set COMWIT_DATABASE_ID in safe cwd gitignored .env)")
 	}
 	var body databasesListResponse
 	if err := newClient(cfg).getJSON(projectDatabasesPath(projectID), &body); err != nil {
@@ -940,10 +964,7 @@ func databaseConfigureCommand(args []string, stdout io.Writer) error {
 		if database.DatabaseID != databaseID {
 			continue
 		}
-		if strings.TrimSpace(database.DatabaseURL) == "" {
-			return errors.New("database response did not include database_url")
-		}
-		keys, err := writeEnvUpdates(target, envUpdate{Key: envDatabaseURLKey, Value: database.DatabaseURL})
+		keys, err := writeDatabaseEnv(target, database.DatabaseID, database.DatabaseURL)
 		if err != nil {
 			return err
 		}
