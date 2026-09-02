@@ -21,12 +21,8 @@ jobs:
           set -euo pipefail
           case "$PR_HEAD" in
             codex/*|claude/*)
-              echo "::error::Agent work branches must be published through burrr-ai/comwit-sre Agent PR publisher; do not open the PR with a human account."
-              exit 1
-              ;;
-            automation/codex/*|automation/claude/*)
               if [[ "$PR_AUTHOR" != "burrr-ai-release-automation[bot]" ]]; then
-                echo "::error::Agent automation branches must be opened by burrr-ai-release-automation[bot]."
+                echo "::error::Agent work branches must be opened by burrr-ai-release-automation[bot] through the burrr-ai/comwit-sre Agent PR publisher."
                 exit 1
               fi
               ;;
