@@ -297,7 +297,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "projects":
 		return projects(args[1:], stdout)
 	case "databases":
-		return databases(args[1:], stdout)
+		return databases(args[1:], stdout, stderr)
 	case "domains":
 		return domainsCommand(args[1:], stdout)
 	case "storage":
@@ -322,7 +322,7 @@ func usage(w io.Writer) {
   comwit login [--project <id>]               (browser device login)
   comwit login --token <token> [--project <id>]
   comwit projects list
-  comwit databases create --project <id> --name <name>
+  comwit databases create --project <id> --name <name> [--from-file <path> --token-out <path> --skip-local-checks --idempotency-key <key> --no-wait]
   comwit databases import-dump --project <id> --name <name> --from-dump dump.sql [--keep-failed-db]
   comwit databases list --project <id>
   comwit databases execute --project <id> --database <id> (--command <sql>|--file <path>) [--json]
@@ -331,6 +331,7 @@ func usage(w io.Writer) {
   comwit databases restore-points list --project <id> --database <id>
   comwit databases restore --project <id> --database <id> (--at <ts>|--generation <id>|--alias <name>) [--name <n>] [--token-out <path>] [--wait]
   comwit databases restore status --project <id> --database <id> --operation <op-id> [--wait]
+  comwit databases operation status --project <id> --database <id> --operation <op-id> [--wait]
   comwit databases aliases list --project <id> --database <id>
   comwit databases aliases set --project <id> --database <id> --alias <name> (--at <ts>|--generation <id>)
   comwit databases aliases delete --project <id> --database <id> --alias <name>
@@ -719,40 +720,13 @@ func openBrowser(target string) error {
 	return exec.Command(name, args...).Start()
 }
 
-func databases(args []string, stdout io.Writer) error {
+func databases(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: comwit databases <create|import-dump|list|execute|delete|token|restore-points|restore|aliases>")
+		return errors.New("usage: comwit databases <create|import-dump|list|execute|delete|token|restore-points|restore|operation|aliases>")
 	}
 	switch args[0] {
 	case "create":
-		fs := flag.NewFlagSet("databases create", flag.ContinueOnError)
-		project := fs.String("project", "", "project id")
-		name := fs.String("name", "", "database name")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		cfg, err := loadConfig()
-		if err != nil {
-			return err
-		}
-		projectID := selectProject(*project, cfg)
-		if projectID == "" {
-			return errors.New("--project is required")
-		}
-		if strings.TrimSpace(*name) == "" {
-			return errors.New("--name is required")
-		}
-		var body databaseCreateResponse
-		payload := map[string]string{"name": strings.TrimSpace(*name)}
-		path := "/v1/projects/" + url.PathEscape(projectID) + "/databases"
-		if err := newClient(cfg).postJSON(path, payload, &body); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "%s\t%s\tcreated=%t\n", body.DatabaseID, body.DatabaseURL, body.Created)
-		if body.DatabaseToken != nil && strings.TrimSpace(*body.DatabaseToken) != "" {
-			fmt.Fprintf(stdout, "token\t%s\n", *body.DatabaseToken)
-		}
-		return nil
+		return databaseCreateCommand(args[1:], stdout, stderr)
 	case "import-dump", "import":
 		return databaseImportDumpCommand(args[1:], stdout)
 	case "list":
@@ -804,6 +778,8 @@ func databases(args []string, stdout io.Writer) error {
 			return databaseRestoreStatusCommand(args[2:], stdout)
 		}
 		return databaseRestoreCommand(args[1:], stdout)
+	case "operation":
+		return databaseOperationCommand(args[1:], stdout)
 	case "aliases":
 		return databaseAliasesCommand(args[1:], stdout)
 	default:

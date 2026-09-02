@@ -40,12 +40,14 @@ go install github.com/burrr-ai/comwit-cli/cmd/comwit@latest
 comwit login --token <cwt_token>     # authenticate (token from the dashboard)
 comwit projects list
 comwit databases create --project <id> --name <name>
+comwit databases create --project <id> --name <name> --from-file ./app.sqlite --token-out ./database.token
 comwit databases import-dump --project <id> --name <name> --from-dump dump.sql
 comwit databases list --project <id>
 comwit databases execute --project <id> --database <id> --command 'select 1;'
 comwit databases execute --project <id> --database <id> --file ./migration.sql
 comwit databases restore-points list --project <id> --database <id>
 comwit databases restore --project <id> --database <id> --at 2026-07-13T00:00:00Z
+comwit databases operation status --project <id> --database <id> --operation <op-id> --wait
 comwit storage create --project <id> --name <globally-unique-bucket> --public
 comwit storage list --project <id>
 comwit storage get --project <id> --storage <id>
@@ -59,6 +61,13 @@ comwit version
 
 `databases execute` and the PITR commands above are available in v0.1.6 and
 require the matching platform-api deployment.
+
+`databases create --from-file` validates a standalone SQLite file, streams it
+with an exact content length, and waits for the new database to become ready.
+Use `--skip-local-checks` to omit the local integrity and foreign-key checks,
+`--idempotency-key` to resume a known attempt, or `--no-wait` to return after
+the upload is accepted; `--token-out` writes the one-time token with mode
+`0600`.
 
 Storage lifecycle and public-access commands are available in v0.1.7 and
 require the matching Storage platform-api deployment.
