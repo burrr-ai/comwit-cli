@@ -1625,7 +1625,7 @@ func (c *client) do(method, path string, body []byte, contentType string, out an
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apiError{status: resp.StatusCode, body: strings.TrimSpace(string(data))}
+		return newAPIError(resp.StatusCode, data)
 	}
 	if out == nil || len(data) == 0 {
 		return nil
@@ -1639,6 +1639,21 @@ func (c *client) do(method, path string, body []byte, contentType string, out an
 type apiError struct {
 	status int
 	body   string
+	code   string
+	detail string
+}
+
+func newAPIError(status int, body []byte) apiError {
+	err := apiError{status: status, body: strings.TrimSpace(string(body))}
+	var envelope struct {
+		Code   string `json:"code"`
+		Detail string `json:"detail"`
+	}
+	if json.Unmarshal(body, &envelope) == nil {
+		err.code = strings.TrimSpace(envelope.Code)
+		err.detail = envelope.Detail
+	}
+	return err
 }
 
 func (e apiError) Error() string {

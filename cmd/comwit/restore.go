@@ -39,13 +39,13 @@ type restorePointsResponse struct {
 }
 
 type restoreOperationItem struct {
-	OperationID          string `json:"operation_id"`
-	Type                 string `json:"type"`
-	Status               string `json:"status"`
-	ResolvedRestorePoint string `json:"resolved_restore_point"`
-	Error                string `json:"error"`
-	CreatedAtMS          uint64 `json:"created_at_ms"`
-	UpdatedAtMS          uint64 `json:"updated_at_ms"`
+	OperationID          string                       `json:"operation_id"`
+	Type                 string                       `json:"type"`
+	Status               string                       `json:"status"`
+	ResolvedRestorePoint string                       `json:"resolved_restore_point"`
+	Error                *databaseAsyncOperationError `json:"error,omitempty"`
+	CreatedAtMS          uint64                       `json:"created_at_ms"`
+	UpdatedAtMS          uint64                       `json:"updated_at_ms"`
 }
 
 type restoredDatabaseView struct {
@@ -376,9 +376,17 @@ func waitRestoreOperation(c *client, projectID, databaseID, operationID string, 
 }
 
 func restoreFailedError(op restoreOperationItem) error {
-	message := strings.TrimSpace(op.Error)
+	message := ""
+	code := ""
+	if op.Error != nil {
+		message = strings.TrimSpace(op.Error.Message)
+		code = strings.TrimSpace(op.Error.Code)
+	}
 	if message == "" {
 		message = "restore failed"
+	}
+	if code != "" {
+		return fmt.Errorf("restore operation %s failed (%s): %s", op.OperationID, code, message)
 	}
 	return fmt.Errorf("restore operation %s failed: %s", op.OperationID, message)
 }
@@ -404,9 +412,7 @@ func printRestoreOperation(w io.Writer, op restoreOperationItem) {
 	if op.ResolvedRestorePoint != "" {
 		fmt.Fprintf(w, "resolved_restore_point\t%s\n", op.ResolvedRestorePoint)
 	}
-	if op.Error != "" {
-		fmt.Fprintf(w, "error\t%s\n", op.Error)
-	}
+	printDatabaseAsyncOperationError(w, op.Error)
 }
 
 func formatUnixMS(ms uint64) string {

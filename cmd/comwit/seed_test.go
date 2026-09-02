@@ -192,6 +192,45 @@ func TestDatabasesCreateFromFileRunsThreeStepWorkflow(t *testing.T) {
 	}
 }
 
+func TestDatabasesCreateFromFilePreservesAPIURLPathPrefix(t *testing.T) {
+	configureSeedTestCLI(t)
+	useFastSeedTimings(t)
+	fixture := createSQLiteSeedFixture(t, 0)
+
+	var mu sync.Mutex
+	var requests []string
+	server := newSeedWorkflowServer(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/proxy/v1/projects/proj_1/databases":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"database_id":"db_seed","database_url":"https://db.example/v1/db_seed","created":true,"database_token":"one-time-token","operation":{"operation_id":"seed_1","type":"database_seed","status":"awaiting_upload"},"upload_path":"/v1/projects/proj_1/databases/db_seed/operations/seed_1/content"}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/proxy/v1/projects/proj_1/databases/db_seed/operations/seed_1/content":
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"operation":{"operation_id":"seed_1","type":"database_seed","status":"queued"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/proxy/v1/projects/proj_1/databases/db_seed/operations/seed_1":
+			_, _ = io.WriteString(w, `{"operation":{"operation_id":"seed_1","type":"database_seed","status":"succeeded"}}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL+"/proxy")
+
+	if err := run([]string{"databases", "create", "--name", "seeded", "--from-file", fixture}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := strings.Join(requests, ","), "POST /proxy/v1/projects/proj_1/databases,PUT /proxy/v1/projects/proj_1/databases/db_seed/operations/seed_1/content,GET /proxy/v1/projects/proj_1/databases/db_seed/operations/seed_1"; got != want {
+		t.Fatalf("requests = %q, want %q", got, want)
+	}
+}
+
 func TestDatabasesCreateFromFileFailedOperationUsesMappedMessage(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -239,6 +278,56 @@ func TestDatabasesCreateFromFileFailedOperationUsesMappedMessage(t *testing.T) {
 			}
 			if !strings.Contains(stdout.String(), "token\tone-time-token") || !strings.Contains(stdout.String(), "status\tfailed") {
 				t.Fatalf("stdout = %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestDatabasesCreateFromFileSurfacesProblemDetailsWithoutSeedCode(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		detail     string
+		notContain string
+	}{
+		{
+			name:   "idempotency conflict",
+			status: http.StatusConflict,
+			detail: "Idempotency-Key was already used with a different database name",
+		},
+		{
+			name:       "create validation failure",
+			status:     http.StatusUnprocessableEntity,
+			detail:     "validation failed",
+			notContain: "SHA-256",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			configureSeedTestCLI(t)
+			fixture := createSQLiteSeedFixture(t, 0)
+			server := newSeedWorkflowServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"title":  http.StatusText(tc.status),
+					"status": tc.status,
+					"detail": tc.detail,
+				})
+			})
+			defer server.Close()
+			t.Setenv("COMWIT_API_URL", server.URL)
+
+			err := run([]string{"databases", "create", "--name", "seeded", "--from-file", fixture}, &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tc.detail) {
+				t.Fatalf("error = %v, want detail %q", err, tc.detail)
+			}
+			if tc.notContain != "" && strings.Contains(err.Error(), tc.notContain) {
+				t.Fatalf("error = %v, must not contain %q", err, tc.notContain)
 			}
 		})
 	}
@@ -300,8 +389,11 @@ func TestDatabasesCreateFromFileReplayExplainsMissingToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "token\tunavailable (idempotent replay") || !strings.Contains(stdout.String(), "token_out\tnot written") {
+	if !strings.Contains(stdout.String(), "token_status\tunavailable: idempotent replay, rotate the token after the operation succeeds") || !strings.Contains(stdout.String(), "token_out\tnot written (") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "token\t") {
+		t.Fatalf("replay emitted a credential-shaped token line: %q", stdout.String())
 	}
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
 		t.Fatalf("replay token file should not exist, stat err = %v", err)
@@ -373,6 +465,106 @@ func TestDatabasesCreateFromFileRetriesUploadFromByteZeroAfter503(t *testing.T) 
 	}
 }
 
+func TestDatabasesCreateFromFileRecoversWhenRetryFindsUploadInProgress(t *testing.T) {
+	configureSeedTestCLI(t)
+	useFastSeedTimings(t)
+	fixture := createSQLiteSeedFixture(t, 0)
+
+	var mu sync.Mutex
+	var requests []string
+	var putAttempts atomic.Int32
+	var operationGets atomic.Int32
+	server := newSeedWorkflowServer(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method)
+		mu.Unlock()
+		switch r.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"database_id":"db_seed","database_url":"https://db.example/v1/db_seed","created":true,"database_token":"one-time-token","operation":{"operation_id":"seed_1","type":"database_seed","status":"awaiting_upload"},"upload_path":"/v1/projects/proj_1/databases/db_seed/operations/seed_1/content"}`)
+		case http.MethodPut:
+			_, _ = io.Copy(io.Discard, r.Body)
+			if putAttempts.Add(1) == 1 {
+				w.Header().Set("Content-Length", "128")
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, `{"operation":`)
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"title":"Conflict","status":409,"detail":"upload is still landing","code":"SEED_UPLOAD_IN_PROGRESS"}`)
+		case http.MethodGet:
+			if operationGets.Add(1) == 1 {
+				_, _ = io.WriteString(w, `{"operation":{"operation_id":"seed_1","type":"database_seed","status":"awaiting_upload"}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"operation":{"operation_id":"seed_1","type":"database_seed","status":"queued"}}`)
+		}
+	})
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"databases", "create", "--name", "seeded", "--from-file", fixture, "--no-wait"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if putAttempts.Load() != 2 || operationGets.Load() != 2 {
+		t.Fatalf("PUT attempts = %d, operation GETs = %d; want 2 and 2", putAttempts.Load(), operationGets.Load())
+	}
+	mu.Lock()
+	gotRequests := strings.Join(requests, ",")
+	mu.Unlock()
+	if gotRequests != "POST,PUT,GET,PUT,GET" {
+		t.Fatalf("request order = %q", gotRequests)
+	}
+	if !strings.Contains(stdout.String(), "status\tqueued") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	for _, want := range []string{"upload attempt 1/3 failed", "upload attempt 2/3 failed"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing %q: %q", want, stderr.String())
+		}
+	}
+}
+
+func TestDatabasesCreateFromFileReportsLastAmbiguousUploadError(t *testing.T) {
+	configureSeedTestCLI(t)
+	useFastSeedTimings(t)
+	fixture := createSQLiteSeedFixture(t, 0)
+	var putAttempts atomic.Int32
+	var operationGets atomic.Int32
+	server := newSeedWorkflowServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"database_id":"db_seed","database_url":"https://db.example/v1/db_seed","created":true,"database_token":"one-time-token","operation":{"operation_id":"seed_1","type":"database_seed","status":"awaiting_upload"},"upload_path":"/v1/projects/proj_1/databases/db_seed/operations/seed_1/content"}`)
+		case http.MethodPut:
+			putAttempts.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Length", "128")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"operation":`)
+		case http.MethodGet:
+			operationGets.Add(1)
+			_, _ = io.WriteString(w, `{"operation":{"operation_id":"seed_1","type":"database_seed","status":"awaiting_upload"}}`)
+		}
+	})
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stderr bytes.Buffer
+	err := run([]string{"databases", "create", "--name", "seeded", "--from-file", fixture, "--no-wait"}, &bytes.Buffer{}, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "upload did not complete after 3 attempts") || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Fatalf("error = %v", err)
+	}
+	if putAttempts.Load() != 3 || operationGets.Load() != 3 {
+		t.Fatalf("PUT attempts = %d, operation GETs = %d; want 3 and 3", putAttempts.Load(), operationGets.Load())
+	}
+	if got := strings.Count(stderr.String(), "upload attempt "); got != 3 {
+		t.Fatalf("stderr logged %d failed attempts, want 3: %q", got, stderr.String())
+	}
+}
+
 func TestDatabasesCreateFromFilePreservesTokenBeforeUploadFailure(t *testing.T) {
 	configureSeedTestCLI(t)
 	fixture := createSQLiteSeedFixture(t, 0)
@@ -408,6 +600,45 @@ func TestDatabasesCreateFromFilePreservesTokenBeforeUploadFailure(t *testing.T) 
 	}
 	if string(token) != "one-time-token\n" {
 		t.Fatalf("token file = %q", token)
+	}
+}
+
+func TestPutDatabaseSeedAttemptHandlesEarlyResponseWhileBodyIsUploading(t *testing.T) {
+	fixture := createSQLiteSeedFixture(t, (1<<20)+8192)
+	file, err := preflightSQLiteSeedFile(fixture, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/upload" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"code":"SEED_CONTENT_ALREADY_FIXED"}`)
+	}))
+
+	stderr, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	if !writerIsTerminal(stderr) {
+		_ = stderr.Close()
+		server.Close()
+		t.Fatalf("%s is not a character device", os.DevNull)
+	}
+	uploadClient := newSeedUploadHTTPClient()
+	c := &client{apiURL: server.URL, token: "test-token"}
+	var response databaseAsyncOperationResponse
+	err = putDatabaseSeedAttempt(uploadClient, c, file, "/upload", stderr, &response)
+	uploadClient.CloseIdleConnections()
+	_ = stderr.Close()
+	server.Close()
+	if err == nil || seedAPIErrorCode(err) != "SEED_CONTENT_ALREADY_FIXED" {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -567,6 +798,30 @@ func TestDatabaseOperationStatusRendersSeedAndRestoreErrors(t *testing.T) {
 	}
 }
 
+func TestDatabasesRestoreStatusDecodesSeedOperationError(t *testing.T) {
+	configureSeedTestCLI(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/operations/seed_1") {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"operation":{"operation_id":"seed_1","type":"database_seed","status":"failed","error":{"code":"SEED_UPLOAD_EXPIRED","message":"expired"}}}`)
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{"databases", "restore", "status", "--database", "db_1", "--operation", "seed_1"}, &stdout, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "SEED_UPLOAD_EXPIRED") || strings.Contains(err.Error(), "decode API response") {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "error_code\tSEED_UPLOAD_EXPIRED") || !strings.Contains(stdout.String(), "error\texpired") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func configureSeedTestCLI(t *testing.T) {
 	t.Helper()
 	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
@@ -579,13 +834,16 @@ func configureSeedTestCLI(t *testing.T) {
 func useFastSeedTimings(t *testing.T) {
 	t.Helper()
 	oldRetry := seedRetryBaseDelay
+	oldUploadRetry := seedUploadRetryDelays
 	oldPollInitial := seedPollInitialDelay
 	oldPollMaximum := seedPollMaximumDelay
 	seedRetryBaseDelay = time.Millisecond
+	seedUploadRetryDelays = [...]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	seedPollInitialDelay = time.Millisecond
 	seedPollMaximumDelay = 2 * time.Millisecond
 	t.Cleanup(func() {
 		seedRetryBaseDelay = oldRetry
+		seedUploadRetryDelays = oldUploadRetry
 		seedPollInitialDelay = oldPollInitial
 		seedPollMaximumDelay = oldPollMaximum
 	})

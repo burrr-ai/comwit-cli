@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -31,9 +32,10 @@ const (
 )
 
 var (
-	seedRetryBaseDelay   = 250 * time.Millisecond
-	seedPollInitialDelay = 2 * time.Second
-	seedPollMaximumDelay = 5 * time.Second
+	seedRetryBaseDelay    = 250 * time.Millisecond
+	seedUploadRetryDelays = [...]time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+	seedPollInitialDelay  = 2 * time.Second
+	seedPollMaximumDelay  = 5 * time.Second
 )
 
 type sqliteSeedFile struct {
@@ -207,9 +209,9 @@ func databaseCreateCommand(args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stdout, "token_out\t%s\n", tokenPath)
 		}
 	} else {
-		fmt.Fprintln(stdout, "token\tunavailable (idempotent replay; rotate after the operation succeeds)")
+		fmt.Fprintln(stdout, "token_status\tunavailable: idempotent replay, rotate the token after the operation succeeds")
 		if tokenPath != "" {
-			fmt.Fprintln(stdout, "token_out\tnot written because the one-time token was not returned on this replay")
+			fmt.Fprintln(stdout, "token_out\tnot written (one-time token unavailable on idempotent replay)")
 		}
 	}
 	fmt.Fprintf(stdout, "operation\t%s\n", created.Operation.OperationID)
@@ -427,6 +429,7 @@ func createDatabaseSeed(c *client, projectID, idempotencyKey string, request dat
 func uploadDatabaseSeed(c *client, file sqliteSeedFile, uploadPath, projectID, databaseID, operationID string, stderr io.Writer) (databaseAsyncOperation, error) {
 	uploadClient := newSeedUploadHTTPClient()
 	defer uploadClient.CloseIdleConnections()
+	var lastAttemptErr error
 	for attempt := 1; attempt <= seedRequestMaxAttempts; attempt++ {
 		var response databaseAsyncOperationResponse
 		err := putDatabaseSeedAttempt(uploadClient, c, file, uploadPath, stderr, &response)
@@ -439,8 +442,16 @@ func uploadDatabaseSeed(c *client, file sqliteSeedFile, uploadPath, projectID, d
 			}
 			return response.Operation, nil
 		}
-		if definitiveSeedUploadError(err) {
+		lastAttemptErr = err
+		fmt.Fprintf(stderr, "upload attempt %d/%d failed: %v\n", attempt, seedRequestMaxAttempts, mapSeedAPIError("upload SQLite file", err))
+		earlierUploadStillLanding := attempt > 1 && seedUploadInProgressError(err)
+		if definitiveSeedUploadError(err) && !earlierUploadStillLanding {
 			return databaseAsyncOperation{}, mapSeedAPIError("upload SQLite file", err)
+		}
+		waitedBeforeStatusCheck := false
+		if earlierUploadStillLanding {
+			time.Sleep(seedUploadRetryDelay(attempt))
+			waitedBeforeStatusCheck = true
 		}
 
 		operation, statusErr := getDatabaseAsyncOperation(c, projectID, databaseID, operationID)
@@ -455,11 +466,13 @@ func uploadDatabaseSeed(c *client, file sqliteSeedFile, uploadPath, projectID, d
 			return databaseAsyncOperation{}, fmt.Errorf("database operation returned unknown status %q after an ambiguous upload", operation.Status)
 		}
 		if attempt == seedRequestMaxAttempts {
-			return databaseAsyncOperation{}, fmt.Errorf("upload did not complete after %d attempts; check with `%s`", seedRequestMaxAttempts, databaseOperationStatusCommand(projectID, databaseID, operationID, false))
+			return databaseAsyncOperation{}, seedUploadDidNotCompleteError(projectID, databaseID, operationID, lastAttemptErr)
 		}
-		time.Sleep(seedRetryDelay(attempt))
+		if !waitedBeforeStatusCheck {
+			time.Sleep(seedUploadRetryDelay(attempt))
+		}
 	}
-	return databaseAsyncOperation{}, errors.New("upload did not complete")
+	return databaseAsyncOperation{}, seedUploadDidNotCompleteError(projectID, databaseID, operationID, lastAttemptErr)
 }
 
 func putDatabaseSeedAttempt(httpClient *http.Client, c *client, file sqliteSeedFile, uploadPath string, stderr io.Writer, out *databaseAsyncOperationResponse) error {
@@ -471,24 +484,27 @@ func putDatabaseSeedAttempt(httpClient *http.Client, c *client, file sqliteSeedF
 	if writerIsTerminal(stderr) {
 		body = newSeedProgressReadCloser(source, stderr, file.Size)
 	}
-	err = doSeedJSONRequest(httpClient, c, http.MethodPut, uploadPath, body, file.Size, "application/vnd.sqlite3", nil, http.StatusAccepted, out)
-	_ = body.Close()
-	if err != nil {
-		return err
-	}
-	return nil
+	return doSeedJSONRequest(httpClient, c, http.MethodPut, uploadPath, body, file.Size, "application/vnd.sqlite3", nil, http.StatusAccepted, out)
 }
 
 func doSeedJSONRequest(httpClient *http.Client, c *client, method, path string, body io.Reader, contentLength int64, contentType string, headers map[string]string, expectedStatus int, out any) error {
+	closeBodyBeforeRequest := func() {
+		if closer, ok := body.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}
 	if strings.TrimSpace(c.token) == "" {
+		closeBodyBeforeRequest()
 		return errors.New("not logged in; run `comwit login --token <token>`")
 	}
 	requestURL, err := seedRequestURL(c.apiURL, path)
 	if err != nil {
+		closeBodyBeforeRequest()
 		return err
 	}
 	req, err := http.NewRequest(method, requestURL, body)
 	if err != nil {
+		closeBodyBeforeRequest()
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.token))
@@ -520,7 +536,7 @@ func doSeedJSONRequest(httpClient *http.Client, c *client, method, path string, 
 		return fmt.Errorf("API response exceeds %d bytes", seedResponseMaxBytes)
 	}
 	if resp.StatusCode != expectedStatus {
-		return apiError{status: resp.StatusCode, body: strings.TrimSpace(string(responseBody))}
+		return newAPIError(resp.StatusCode, responseBody)
 	}
 	if out == nil || len(responseBody) == 0 {
 		return nil
@@ -532,9 +548,8 @@ func doSeedJSONRequest(httpClient *http.Client, c *client, method, path string, 
 }
 
 func seedRequestURL(apiBase, path string) (string, error) {
-	base, err := url.Parse(strings.TrimRight(apiBase, "/") + "/")
-	if err != nil {
-		return "", fmt.Errorf("invalid API URL: %w", err)
+	if !strings.HasPrefix(path, "/") {
+		return "", errors.New("API returned an invalid upload_path")
 	}
 	reference, err := url.Parse(path)
 	if err != nil {
@@ -543,7 +558,7 @@ func seedRequestURL(apiBase, path string) (string, error) {
 	if reference.IsAbs() || reference.Host != "" {
 		return "", errors.New("API returned an invalid upload_path")
 	}
-	return base.ResolveReference(reference).String(), nil
+	return apiBase + path, nil
 }
 
 func newSeedUploadHTTPClient() *http.Client {
@@ -721,6 +736,11 @@ func definitiveSeedUploadError(err error) bool {
 	return apiErr.status >= 400 && apiErr.status < 500 && apiErr.status != http.StatusRequestTimeout && apiErr.status != http.StatusTooManyRequests
 }
 
+func seedUploadInProgressError(err error) bool {
+	var apiErr apiError
+	return errors.As(err, &apiErr) && apiErr.status == http.StatusConflict && strings.EqualFold(apiErr.code, "SEED_UPLOAD_IN_PROGRESS")
+}
+
 func retryableSeedRequestError(err error) bool {
 	if err == nil {
 		return false
@@ -739,6 +759,25 @@ func retryableSeedRequestError(err error) bool {
 
 func seedRetryDelay(attempt int) time.Duration {
 	return time.Duration(attempt) * seedRetryBaseDelay
+}
+
+func seedUploadRetryDelay(attempt int) time.Duration {
+	index := attempt - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(seedUploadRetryDelays) {
+		index = len(seedUploadRetryDelays) - 1
+	}
+	return seedUploadRetryDelays[index]
+}
+
+func seedUploadDidNotCompleteError(projectID, databaseID, operationID string, lastAttemptErr error) error {
+	command := databaseOperationStatusCommand(projectID, databaseID, operationID, false)
+	if lastAttemptErr != nil {
+		return fmt.Errorf("upload did not complete after %d attempts; check with `%s`; last upload attempt failed: %w", seedRequestMaxAttempts, command, lastAttemptErr)
+	}
+	return fmt.Errorf("upload did not complete after %d attempts; check with `%s`", seedRequestMaxAttempts, command)
 }
 
 func growSeedPollDelay(delay time.Duration) time.Duration {
@@ -800,20 +839,10 @@ func mapSeedAPIError(action string, err error) error {
 	}
 	var apiErr apiError
 	if errors.As(err, &apiErr) {
-		switch apiErr.status {
-		case http.StatusBadRequest:
-			return fmt.Errorf("%s failed: the server rejected the file as invalid SQLite input", action)
-		case http.StatusRequestEntityTooLarge:
-			return fmt.Errorf("%s failed: the SQLite file is too large (maximum 2 GiB)", action)
-		case http.StatusLengthRequired:
-			return fmt.Errorf("%s failed: the server requires an exact Content-Length", action)
-		case http.StatusUnprocessableEntity:
-			return fmt.Errorf("%s failed: the uploaded bytes did not match the preflight SHA-256; retry with an unchanged file", action)
-		case http.StatusServiceUnavailable:
-			return fmt.Errorf("%s failed: database upload capacity is temporarily unavailable; retry later", action)
-		default:
-			return fmt.Errorf("%s failed: API HTTP %d", action, apiErr.status)
+		if strings.TrimSpace(apiErr.detail) != "" {
+			return fmt.Errorf("%s failed: %s", action, apiErr.detail)
 		}
+		return fmt.Errorf("%s failed: API HTTP %d", action, apiErr.status)
 	}
 	return fmt.Errorf("%s failed: %w", action, err)
 }
@@ -823,7 +852,7 @@ func seedAPIErrorCode(err error) string {
 	if !errors.As(err, &apiErr) {
 		return ""
 	}
-	return knownSeedErrorCode(apiErr.body)
+	return strings.ToUpper(strings.TrimSpace(apiErr.code))
 }
 
 func knownSeedErrorCode(value string) string {
@@ -910,12 +939,15 @@ func writerIsTerminal(w io.Writer) bool {
 }
 
 type seedProgressReadCloser struct {
+	mu       sync.Mutex
 	source   *os.File
 	output   io.Writer
 	total    int64
 	read     int64
 	lastDraw time.Time
 	finished bool
+	closed   bool
+	closeErr error
 }
 
 func newSeedProgressReadCloser(source *os.File, output io.Writer, total int64) *seedProgressReadCloser {
@@ -924,27 +956,39 @@ func newSeedProgressReadCloser(source *os.File, output io.Writer, total int64) *
 }
 
 func (r *seedProgressReadCloser) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return 0, os.ErrClosed
+	}
 	n, err := r.source.Read(p)
 	r.read += int64(n)
 	now := time.Now()
 	if !r.finished && (r.read >= r.total || now.Sub(r.lastDraw) >= 250*time.Millisecond) {
-		r.draw(r.read >= r.total)
+		r.drawLocked(r.read >= r.total)
 		r.lastDraw = now
 	}
 	if errors.Is(err, io.EOF) && !r.finished {
-		r.draw(true)
+		r.drawLocked(true)
 	}
 	return n, err
 }
 
 func (r *seedProgressReadCloser) Close() error {
-	if !r.finished {
-		r.draw(true)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return r.closeErr
 	}
-	return r.source.Close()
+	r.closed = true
+	if !r.finished {
+		r.drawLocked(true)
+	}
+	r.closeErr = r.source.Close()
+	return r.closeErr
 }
 
-func (r *seedProgressReadCloser) draw(final bool) {
+func (r *seedProgressReadCloser) drawLocked(final bool) {
 	percent := float64(0)
 	if r.total > 0 {
 		percent = float64(r.read) * 100 / float64(r.total)
