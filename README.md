@@ -77,6 +77,10 @@ and never sends SQL text to the API. Pass `--sqlite-out <path>` to keep the
 converted file for inspection or a later retry; the destination must not
 already exist. `--from-dump` and `--from-file` are mutually exclusive.
 
+`databases create --from-file`, `databases create --from-dump`, and
+`databases operation status` are available in v0.1.8 and require the matching
+platform-api deployment.
+
 Storage lifecycle and public-access commands are available in v0.1.7 and
 require the matching Storage platform-api deployment.
 
