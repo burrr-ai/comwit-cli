@@ -170,10 +170,7 @@ func databaseImportDumpCommand(args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "token\t%s\n", token)
 	fmt.Fprintf(stdout, "statements\t%d\n", len(statements))
 	if len(skipped) > 0 {
-		fmt.Fprintf(stdout, "skipped\t%d\n", len(skipped))
-		for _, skippedStatement := range skipped {
-			fmt.Fprintf(stdout, "skipped_statement\t%d\t%s\n", skippedStatement.Index, skippedStatement.Reason)
-		}
+		printSkippedDumpStatements(stdout, skipped)
 	}
 	fmt.Fprintf(stdout, "batches\t%d\n", len(batches))
 
@@ -202,7 +199,7 @@ func loadDumpStatements(path string) ([]dumpStatement, []skippedDumpStatement, e
 		return nil, nil, err
 	}
 	if looksLikeSQLiteDatabaseFile(data) {
-		return nil, nil, errors.New("--from-dump expects a SQL dump, but the file looks like a SQLite .db database; export it with `.dump` first")
+		return nil, nil, errors.New("--from-dump expects a SQL dump, but the file looks like a SQLite .db database; use --from-file for an existing SQLite database")
 	}
 	statements, err := splitSQLDump(string(data))
 	if err != nil {
@@ -218,6 +215,13 @@ func loadDumpStatements(path string) ([]dumpStatement, []skippedDumpStatement, e
 		filtered = append(filtered, statement)
 	}
 	return filtered, skipped, nil
+}
+
+func printSkippedDumpStatements(w io.Writer, skipped []skippedDumpStatement) {
+	fmt.Fprintf(w, "skipped\t%d\n", len(skipped))
+	for _, statement := range skipped {
+		fmt.Fprintf(w, "skipped_statement\t%d\t%s\n", statement.Index, statement.Reason)
+	}
 }
 
 func looksLikeSQLiteDatabaseFile(data []byte) bool {
@@ -434,7 +438,7 @@ func isTransactionControlStatement(sql string) bool {
 	if len(words) == 0 {
 		return false
 	}
-	return words[0] == "begin" || words[0] == "commit" || words[0] == "rollback"
+	return words[0] == "begin" || words[0] == "commit" || words[0] == "end" || words[0] == "rollback"
 }
 
 func ignoredDumpStatementReason(sql string) (string, bool) {

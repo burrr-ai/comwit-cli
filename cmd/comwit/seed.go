@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +104,11 @@ type databaseSeedCreateResponse struct {
 	UploadPath    string                 `json:"upload_path"`
 }
 
+type convertedSQLiteSeedFile struct {
+	Path      string
+	Temporary bool
+}
+
 type databaseAsyncOperationResponse struct {
 	Operation databaseAsyncOperation `json:"operation"`
 }
@@ -113,11 +120,13 @@ type seedAmbiguousRequestError struct {
 func (e seedAmbiguousRequestError) Error() string { return e.err.Error() }
 func (e seedAmbiguousRequestError) Unwrap() error { return e.err }
 
-func databaseCreateCommand(args []string, stdout, stderr io.Writer) error {
+func databaseCreateCommand(args []string, stdout, stderr io.Writer) (returnErr error) {
 	fs := flag.NewFlagSet("databases create", flag.ContinueOnError)
 	project := fs.String("project", "", "project id")
 	name := fs.String("name", "", "database name")
 	fromFile := fs.String("from-file", "", "create the database from this SQLite file")
+	fromDump := fs.String("from-dump", "", "convert this SQL dump locally and create the database from it")
+	sqliteOut := fs.String("sqlite-out", "", "keep the SQLite file converted from --from-dump at this path")
 	tokenOut := fs.String("token-out", "", "write the database's one-time token to this file (0600)")
 	skipLocalChecks := fs.Bool("skip-local-checks", false, "skip local SQLite integrity and foreign-key checks")
 	idempotencyKey := fs.String("idempotency-key", "", "stable key for safely retrying file-based creation")
@@ -126,7 +135,13 @@ func databaseCreateCommand(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: comwit databases create --project <id> --name <name> [--from-file <path> --token-out <path> --skip-local-checks --idempotency-key <key> --no-wait]")
+		return errors.New("usage: comwit databases create --project <id> --name <name> [--from-file <path> | --from-dump <path> [--sqlite-out <path>]] [--token-out <path> --skip-local-checks --idempotency-key <key> --no-wait]")
+	}
+	if *fromFile != "" && *fromDump != "" {
+		return errors.New("--from-file and --from-dump are mutually exclusive")
+	}
+	if *sqliteOut != "" && *fromDump == "" {
+		return errors.New("--sqlite-out requires --from-dump")
 	}
 
 	cfg, err := loadConfig()
@@ -142,9 +157,9 @@ func databaseCreateCommand(args []string, stdout, stderr io.Writer) error {
 		return errors.New("--name is required")
 	}
 
-	if *fromFile == "" {
+	if *fromFile == "" && *fromDump == "" {
 		if strings.TrimSpace(*tokenOut) != "" || *skipLocalChecks || *idempotencyKey != "" || *noWait {
-			return errors.New("--token-out, --skip-local-checks, --idempotency-key, and --no-wait require --from-file")
+			return errors.New("--token-out, --skip-local-checks, --idempotency-key, and --no-wait require --from-file or --from-dump")
 		}
 		var body databaseCreateResponse
 		if err := newClient(cfg).postJSON(projectDatabasesPath(projectID), map[string]string{"name": databaseName}, &body); err != nil {
@@ -157,8 +172,30 @@ func databaseCreateCommand(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 
-	filePath := *fromFile
 	tokenPath := strings.TrimSpace(*tokenOut)
+	filePath := *fromFile
+	if *fromDump != "" {
+		converted, err := convertDumpToSQLite(*fromDump, *sqliteOut, stdout, stderr)
+		if converted.Path != "" {
+			if converted.Temporary {
+				defer func() {
+					if cleanupErr := removeConvertedSQLiteFiles(converted.Path); cleanupErr != nil {
+						cleanupErr = fmt.Errorf("remove temporary converted SQLite file %s: %w", converted.Path, cleanupErr)
+						returnErr = errors.Join(returnErr, cleanupErr)
+					}
+				}()
+			} else {
+				fmt.Fprintf(stdout, "sqlite_out\t%s\n", converted.Path)
+			}
+		}
+		if err != nil {
+			if converted.Temporary {
+				return temporarySQLiteInspectionError(err)
+			}
+			return err
+		}
+		filePath = converted.Path
+	}
 	if err := validateSeedTokenOutputPath(filePath, tokenPath); err != nil {
 		return err
 	}
@@ -175,6 +212,9 @@ func databaseCreateCommand(args []string, stdout, stderr io.Writer) error {
 
 	file, err := preflightSQLiteSeedFile(filePath, *skipLocalChecks)
 	if err != nil {
+		if *fromDump != "" && *sqliteOut == "" {
+			return temporarySQLiteInspectionError(err)
+		}
 		return err
 	}
 	apiClient := newClient(cfg)
@@ -251,6 +291,180 @@ func databaseCreateCommand(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	return waitForDatabaseSeed(apiClient, projectID, created.DatabaseID, created.DatabaseURL, created.Operation.OperationID, stdout, lastStatus)
+}
+
+func convertDumpToSQLite(dumpPath, sqliteOut string, stdout, stderr io.Writer) (convertedSQLiteSeedFile, error) {
+	statements, skipped, err := loadDumpStatements(dumpPath)
+	if err != nil {
+		return convertedSQLiteSeedFile{}, err
+	}
+	statements, skipped = filterSQLiteSeedDumpStatements(statements, skipped)
+	if len(statements) == 0 {
+		return convertedSQLiteSeedFile{}, errors.New("dump contains no SQL statements to convert")
+	}
+
+	converted, err := createConvertedSQLiteFile(sqliteOut)
+	if err != nil {
+		return convertedSQLiteSeedFile{}, err
+	}
+	if len(skipped) > 0 {
+		printSkippedDumpStatements(stderr, skipped)
+	}
+	if err := replayDumpToSQLite(converted.Path, statements, stderr); err != nil {
+		return converted, err
+	}
+	if err := checkConvertedSQLiteSingleFile(converted.Path); err != nil {
+		return converted, err
+	}
+	fmt.Fprintf(stdout, "convert\t%d statements\n", len(statements))
+	fmt.Fprintf(stdout, "convert_skipped\t%d statements\n", len(skipped))
+	return converted, nil
+}
+
+func filterSQLiteSeedDumpStatements(statements []dumpStatement, skipped []skippedDumpStatement) ([]dumpStatement, []skippedDumpStatement) {
+	if !dumpContainsTransaction(statements) {
+		return statements, skipped
+	}
+	filtered := make([]dumpStatement, 0, len(statements))
+	for _, statement := range statements {
+		if isTransactionControlStatement(statement.SQL) {
+			skipped = append(skipped, skippedDumpStatement{
+				Index:  statement.Index,
+				Reason: "ignored transaction control statement; conversion uses one transaction",
+			})
+			continue
+		}
+		filtered = append(filtered, statement)
+	}
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i].Index < skipped[j].Index })
+	return filtered, skipped
+}
+
+func createConvertedSQLiteFile(sqliteOut string) (convertedSQLiteSeedFile, error) {
+	if sqliteOut == "" {
+		file, err := os.CreateTemp(os.TempDir(), "comwit-seed-*.sqlite")
+		if err != nil {
+			return convertedSQLiteSeedFile{}, fmt.Errorf("create temporary SQLite file: %w", err)
+		}
+		path := file.Name()
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
+			return convertedSQLiteSeedFile{}, fmt.Errorf("close temporary SQLite file: %w", err)
+		}
+		return convertedSQLiteSeedFile{Path: path, Temporary: true}, nil
+	}
+
+	file, err := os.OpenFile(sqliteOut, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return convertedSQLiteSeedFile{}, fmt.Errorf("--sqlite-out %s already exists; refusing to overwrite", sqliteOut)
+		}
+		return convertedSQLiteSeedFile{}, fmt.Errorf("create --sqlite-out %s: %w", sqliteOut, err)
+	}
+	if err := file.Close(); err != nil {
+		return convertedSQLiteSeedFile{Path: sqliteOut}, fmt.Errorf("close --sqlite-out %s: %w", sqliteOut, err)
+	}
+	return convertedSQLiteSeedFile{Path: sqliteOut}, nil
+}
+
+func replayDumpToSQLite(path string, statements []dumpStatement, stderr io.Writer) (returnErr error) {
+	dsn, err := sqliteFileDSN(path, nil)
+	if err != nil {
+		return err
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("open converted SQLite file: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close converted SQLite file: %w", closeErr))
+		}
+	}()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open converted SQLite connection: %w", err)
+	}
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close converted SQLite connection: %w", closeErr))
+		}
+	}()
+	for _, pragma := range []string{
+		"PRAGMA journal_mode = DELETE",
+		"PRAGMA foreign_keys = OFF",
+		"PRAGMA synchronous = OFF",
+	} {
+		if _, err := conn.ExecContext(ctx, pragma); err != nil {
+			return fmt.Errorf("configure converted SQLite file: %w", err)
+		}
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin dump conversion transaction: %w", err)
+	}
+	terminalProgress := writerIsTerminal(stderr)
+	lastProgress := time.Now()
+	progressDrawn := false
+	finishProgress := func() {
+		if progressDrawn {
+			fmt.Fprintln(stderr)
+			progressDrawn = false
+		}
+	}
+	for offset, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement.SQL); err != nil {
+			finishProgress()
+			_ = tx.Rollback()
+			return dumpImportExecutionError{
+				StatementIndex: statement.Index,
+				StatementSQL:   statement.SQL,
+				Message:        err.Error(),
+			}
+		}
+		if terminalProgress && time.Since(lastProgress) >= 2*time.Second {
+			fmt.Fprintf(stderr, "\rconvert\t%d/%d statements", offset+1, len(statements))
+			lastProgress = time.Now()
+			progressDrawn = true
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		finishProgress()
+		return fmt.Errorf("commit dump conversion transaction: %w", err)
+	}
+	finishProgress()
+
+	return nil
+}
+
+func checkConvertedSQLiteSingleFile(path string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Lstat(path + suffix); err == nil {
+			return fmt.Errorf("converted SQLite file left an unexpected %s sidecar", suffix)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect converted SQLite sidecar %s: %w", path+suffix, err)
+		}
+	}
+	return nil
+}
+
+func removeConvertedSQLiteFiles(path string) error {
+	var cleanupErr error
+	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		if err := os.Remove(candidate); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	return cleanupErr
+}
+
+func temporarySQLiteInspectionError(err error) error {
+	return fmt.Errorf("%w\ntemporary converted SQLite file was removed; rerun with --sqlite-out <path> to inspect it", err)
 }
 
 func validateSeedTokenOutputPath(filePath, tokenPath string) error {
@@ -352,16 +566,14 @@ func preflightSQLiteSeedFile(path string, skipLocalChecks bool) (sqliteSeedFile,
 }
 
 func checkSQLiteSeedIntegrity(path string) error {
-	absolutePath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("resolve SQLite file path: %w", err)
-	}
-	dsn := &url.URL{Scheme: "file", Path: filepath.ToSlash(absolutePath)}
-	query := dsn.Query()
+	query := make(url.Values)
 	query.Set("immutable", "1")
 	query.Set("mode", "ro")
-	dsn.RawQuery = query.Encode()
-	db, err := sql.Open("sqlite", dsn.String())
+	dsn, err := sqliteFileDSN(path, query)
+	if err != nil {
+		return err
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("open SQLite file for local checks: %w", err)
 	}
@@ -387,6 +599,33 @@ func checkSQLiteSeedIntegrity(path string) error {
 		return fmt.Errorf("local SQLite foreign_key_check failed: %w", err)
 	}
 	return nil
+}
+
+func sqliteFileDSN(path string, query url.Values) (string, error) {
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve SQLite file path: %w", err)
+	}
+	return sqliteFileDSNFromAbsolutePath(absolutePath, query), nil
+}
+
+func sqliteFileDSNFromAbsolutePath(path string, query url.Values) string {
+	slashPath := filepath.ToSlash(path)
+	if windowsDrivePath(slashPath) {
+		slashPath = "/" + slashPath
+	}
+	dsn := &url.URL{Scheme: "file", Path: slashPath}
+	if len(query) > 0 {
+		dsn.RawQuery = query.Encode()
+	}
+	return dsn.String()
+}
+
+func windowsDrivePath(path string) bool {
+	if len(path) < 3 || path[1] != ':' || path[2] != '/' {
+		return false
+	}
+	return path[0] >= 'A' && path[0] <= 'Z' || path[0] >= 'a' && path[0] <= 'z'
 }
 
 func sha256File(path string) (string, error) {

@@ -41,6 +41,7 @@ comwit login --token <cwt_token>     # authenticate (token from the dashboard)
 comwit projects list
 comwit databases create --project <id> --name <name>
 comwit databases create --project <id> --name <name> --from-file ./app.sqlite --token-out ./database.token
+comwit databases create --project <id> --name <name> --from-dump ./dump.sql --sqlite-out ./app.sqlite --token-out ./database.token
 comwit databases import-dump --project <id> --name <name> --from-dump dump.sql
 comwit databases list --project <id>
 comwit databases execute --project <id> --database <id> --command 'select 1;'
@@ -68,6 +69,13 @@ Use `--skip-local-checks` to omit the local integrity and foreign-key checks,
 `--idempotency-key` to resume a known attempt, or `--no-wait` to return after
 the upload is accepted; `--token-out` writes the one-time token with mode
 `0600`.
+
+`databases create --from-dump` converts a SQLite-compatible SQL dump into a
+temporary SQLite file with the built-in engine, then runs the same validation,
+upload, and wait flow as `--from-file`. It does not require a `sqlite3` binary
+and never sends SQL text to the API. Pass `--sqlite-out <path>` to keep the
+converted file for inspection or a later retry; the destination must not
+already exist. `--from-dump` and `--from-file` are mutually exclusive.
 
 Storage lifecycle and public-access commands are available in v0.1.7 and
 require the matching Storage platform-api deployment.

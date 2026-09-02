@@ -322,7 +322,7 @@ func usage(w io.Writer) {
   comwit login [--project <id>]               (browser device login)
   comwit login --token <token> [--project <id>]
   comwit projects list
-  comwit databases create --project <id> --name <name> [--from-file <path> --token-out <path> --skip-local-checks --idempotency-key <key> --no-wait]
+  comwit databases create --project <id> --name <name> [--from-file <path> | --from-dump <path> [--sqlite-out <path>]] [--token-out <path> --skip-local-checks --idempotency-key <key> --no-wait]
   comwit databases import-dump --project <id> --name <name> --from-dump dump.sql [--keep-failed-db]
   comwit databases list --project <id>
   comwit databases execute --project <id> --database <id> (--command <sql>|--file <path>) [--json]
