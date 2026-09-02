@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -204,9 +205,9 @@ BEGIN TRANSACTION;
 CREATE TABLE parent (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);
 CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent(id));
 INSERT INTO child(id, parent_id) VALUES (10, 1);
-INSERT INTO parent(id, name) VALUES (1, 'parent');
+INSERT INTO parent(id, name) VALUES (1, 'one'), (2, 'two'), (3, 'three');
 DELETE FROM sqlite_sequence;
-INSERT INTO sqlite_sequence(name, seq) VALUES ('parent', 1);
+INSERT INTO sqlite_sequence(name, seq) VALUES ('parent', 100);
 COMMIT;
 `)
 	sqliteOut := filepath.Join(t.TempDir(), "converted.sqlite")
@@ -279,16 +280,35 @@ COMMIT;
 	if _, err := preflightSQLiteSeedFile(sqliteOut, false); err != nil {
 		t.Fatalf("converted file failed preflight: %v", err)
 	}
-	assertSQLiteRowCount(t, sqliteOut, "parent", 1)
+	assertSQLiteRowCount(t, sqliteOut, "parent", 3)
 	assertSQLiteRowCount(t, sqliteOut, "child", 1)
+	dsn, err := sqliteFileDSN(sqliteOut, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sequence int
+	if err := db.QueryRow("SELECT seq FROM sqlite_sequence WHERE name = 'parent'").Scan(&sequence); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if sequence != 100 {
+		t.Fatalf("sqlite_sequence seq = %d, want 100", sequence)
+	}
 	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
 		if _, err := os.Stat(sqliteOut + suffix); !os.IsNotExist(err) {
 			t.Fatalf("unexpected converted-file sidecar %s: %v", sqliteOut+suffix, err)
 		}
 	}
 	for _, want := range []string{
-		"convert\t5 statements",
-		"convert_skipped\t5 statements",
+		"convert\t7 statements",
+		"convert_skipped\t3 statements",
 		"sqlite_out\t" + sqliteOut,
 		"database\tdb_seed",
 		"status\tsucceeded",
@@ -298,8 +318,64 @@ COMMIT;
 			t.Fatalf("stdout missing %q: %q", want, stdout.String())
 		}
 	}
-	if !strings.Contains(stderr.String(), "skipped\t5") || !strings.Contains(stderr.String(), "ignored transaction control statement") {
+	if !strings.Contains(stderr.String(), "skipped\t3") || !strings.Contains(stderr.String(), "ignored transaction control statement") || strings.Contains(stderr.String(), "ignored sqlite_sequence maintenance statement") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestConvertDumpSkipsMissingSQLiteSequenceTable(t *testing.T) {
+	dumpPath := createSeedDumpFixture(t, `
+CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT);
+DELETE FROM sqlite_sequence;
+`)
+	sqliteOut := filepath.Join(t.TempDir(), "converted.sqlite")
+	var stdout, stderr bytes.Buffer
+	if _, err := convertDumpToSQLite(dumpPath, sqliteOut, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	assertSQLiteRowCount(t, sqliteOut, "t", 0)
+	if !strings.Contains(stdout.String(), "convert\t1 statements") || !strings.Contains(stdout.String(), "convert_skipped\t1 statements") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	for _, want := range []string{"skipped\t1", "skipped_statement\t2", "sqlite_sequence does not exist"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing %q: %q", want, stderr.String())
+		}
+	}
+}
+
+func TestFilterSQLiteSeedDumpStatementsTreatsEndAsTransactionControl(t *testing.T) {
+	for _, sql := range []string{"END;", "END TRANSACTION;"} {
+		t.Run(sql, func(t *testing.T) {
+			statements := []dumpStatement{
+				{Index: 1, SQL: "CREATE TABLE kept(id INTEGER);"},
+				{Index: 2, SQL: sql},
+			}
+			filtered, skipped := filterSQLiteSeedDumpStatements(statements, nil)
+			if len(filtered) != 1 || filtered[0].Index != 1 {
+				t.Fatalf("filtered = %#v", filtered)
+			}
+			if len(skipped) != 1 || skipped[0].Index != 2 {
+				t.Fatalf("skipped = %#v", skipped)
+			}
+		})
+	}
+}
+
+func TestBuildDumpImportBatchesDoesNotTreatStandaloneEndAsTransaction(t *testing.T) {
+	statements := []dumpStatement{
+		{Index: 1, SQL: "END;"},
+		{Index: 2, SQL: "SELECT 1;"},
+	}
+	if dumpContainsTransaction(statements) {
+		t.Fatal("standalone END must not make import-dump transaction-wrapped")
+	}
+	batches, err := buildDumpImportBatches(statements, defaultImportMaxRequestBytes, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != 2 {
+		t.Fatalf("batches = %d, want 2", len(batches))
 	}
 }
 
@@ -339,7 +415,7 @@ func TestDatabasesCreateFromDumpValidatesFlagsAndInput(t *testing.T) {
 
 	sqlitePath := createSQLiteSeedFixture(t, 0)
 	err := run([]string{"databases", "create", "--name", "seeded", "--from-dump", sqlitePath}, &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "--from-file") {
+	if err == nil || !strings.Contains(err.Error(), "`comwit databases create --from-file <path>`") {
 		t.Fatalf("SQLite --from-dump error = %v", err)
 	}
 
@@ -361,6 +437,150 @@ func TestDatabasesCreateFromDumpValidatesFlagsAndInput(t *testing.T) {
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("invalid inputs made %d API requests", requests.Load())
+	}
+}
+
+func TestDatabasesCreateRejectsCollidingSeedPaths(t *testing.T) {
+	configureSeedTestCLI(t)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+
+	t.Run("token out and from dump", func(t *testing.T) {
+		dumpPath := createSeedDumpFixture(t, "CREATE TABLE kept(id INTEGER PRIMARY KEY);")
+		wantDump, err := os.ReadFile(dumpPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sqliteOut := filepath.Join(t.TempDir(), "converted.sqlite")
+		err = run([]string{"databases", "create", "--name", "seeded", "--from-dump", dumpPath, "--sqlite-out", sqliteOut, "--token-out", dumpPath}, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--token-out must not overwrite --from-dump") {
+			t.Fatalf("error = %v", err)
+		}
+		gotDump, readErr := os.ReadFile(dumpPath)
+		if readErr != nil || !bytes.Equal(gotDump, wantDump) {
+			t.Fatalf("dump changed: read=%v got=%q want=%q", readErr, gotDump, wantDump)
+		}
+		if _, statErr := os.Stat(sqliteOut); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("--sqlite-out was created: %v", statErr)
+		}
+	})
+
+	t.Run("token out and sqlite out", func(t *testing.T) {
+		dumpPath := createSeedDumpFixture(t, "CREATE TABLE kept(id INTEGER PRIMARY KEY);")
+		sqliteOut := filepath.Join(t.TempDir(), "converted.sqlite")
+		err := run([]string{"databases", "create", "--name", "seeded", "--from-dump", dumpPath, "--sqlite-out", sqliteOut, "--token-out", sqliteOut}, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--token-out must not overwrite --sqlite-out") {
+			t.Fatalf("error = %v", err)
+		}
+		if _, statErr := os.Stat(sqliteOut); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("--sqlite-out was created: %v", statErr)
+		}
+	})
+
+	t.Run("token out and from file", func(t *testing.T) {
+		fromFile := createSQLiteSeedFixture(t, 0)
+		wantFile, err := os.ReadFile(fromFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = run([]string{"databases", "create", "--name", "seeded", "--from-file", fromFile, "--token-out", fromFile}, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--token-out must not overwrite --from-file") {
+			t.Fatalf("error = %v", err)
+		}
+		gotFile, readErr := os.ReadFile(fromFile)
+		if readErr != nil || !bytes.Equal(gotFile, wantFile) {
+			t.Fatalf("SQLite file changed: read=%v got=%d bytes want=%d", readErr, len(gotFile), len(wantFile))
+		}
+	})
+
+	t.Run("sqlite out and from dump", func(t *testing.T) {
+		dumpPath := createSeedDumpFixture(t, "CREATE TABLE kept(id INTEGER PRIMARY KEY);")
+		wantDump, err := os.ReadFile(dumpPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = run([]string{"databases", "create", "--name", "seeded", "--from-dump", dumpPath, "--sqlite-out", dumpPath}, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--sqlite-out must not overwrite --from-dump") {
+			t.Fatalf("error = %v", err)
+		}
+		gotDump, readErr := os.ReadFile(dumpPath)
+		if readErr != nil || !bytes.Equal(gotDump, wantDump) {
+			t.Fatalf("dump changed: read=%v got=%q want=%q", readErr, gotDump, wantDump)
+		}
+	})
+
+	t.Run("same file alias", func(t *testing.T) {
+		dumpPath := createSeedDumpFixture(t, "CREATE TABLE kept(id INTEGER PRIMARY KEY);")
+		tokenPath := filepath.Join(t.TempDir(), "dump-hard-link.sql")
+		if err := os.Link(dumpPath, tokenPath); err != nil {
+			t.Fatal(err)
+		}
+		sqliteOut := filepath.Join(t.TempDir(), "converted.sqlite")
+		err := run([]string{"databases", "create", "--name", "seeded", "--from-dump", dumpPath, "--sqlite-out", sqliteOut, "--token-out", tokenPath}, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--token-out must not overwrite --from-dump") {
+			t.Fatalf("error = %v", err)
+		}
+		if _, statErr := os.Stat(sqliteOut); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("--sqlite-out was created: %v", statErr)
+		}
+	})
+
+	if requests.Load() != 0 {
+		t.Fatalf("colliding paths made %d API requests", requests.Load())
+	}
+}
+
+func TestDatabasesCreateFromDumpValidatesSQLiteOutBeforeReadingDump(t *testing.T) {
+	configureSeedTestCLI(t)
+	missingDump := filepath.Join(t.TempDir(), "missing.sql")
+
+	existingOut := filepath.Join(t.TempDir(), "existing.sqlite")
+	if err := os.WriteFile(existingOut, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := run([]string{"databases", "create", "--name", "seeded", "--from-dump", missingDump, "--sqlite-out", existingOut}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "already exists; refusing to overwrite") {
+		t.Fatalf("existing output error = %v", err)
+	}
+
+	missingParentOut := filepath.Join(t.TempDir(), "missing", "converted.sqlite")
+	err = run([]string{"databases", "create", "--name", "seeded", "--from-dump", missingDump, "--sqlite-out", missingParentOut}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--sqlite-out parent directory") {
+		t.Fatalf("missing parent error = %v", err)
+	}
+}
+
+func TestDatabasesCreateFromDumpRejectsBadIdempotencyKeyBeforeConversion(t *testing.T) {
+	configureSeedTestCLI(t)
+	dumpPath := createSeedDumpFixture(t, "CREATE TABLE kept(id INTEGER PRIMARY KEY);")
+	sqliteOut := filepath.Join(t.TempDir(), "converted.sqlite")
+	err := run([]string{"databases", "create", "--name", "seeded", "--from-dump", dumpPath, "--sqlite-out", sqliteOut, "--idempotency-key", "bad\nkey"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "printable ASCII") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, statErr := os.Stat(sqliteOut); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("--sqlite-out was created: %v", statErr)
+	}
+}
+
+func TestConvertDumpRejectsEmptyDatabase(t *testing.T) {
+	dumpPath := createSeedDumpFixture(t, "PRAGMA foreign_keys=OFF;")
+	sqliteOut := filepath.Join(t.TempDir(), "converted.sqlite")
+	_, err := convertDumpToSQLite(dumpPath, sqliteOut, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || err.Error() != "dump produced an empty database (no tables)" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSQLiteSeedPreflightUsesSourceNeutralWording(t *testing.T) {
+	_, err := preflightSQLiteSeedFile(filepath.Join(t.TempDir(), "missing.sqlite"), false)
+	if err == nil || !strings.Contains(err.Error(), "the SQLite file") || strings.Contains(err.Error(), "--from-file") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

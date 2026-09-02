@@ -194,12 +194,20 @@ func databaseImportDumpCommand(args []string, stdout io.Writer) error {
 }
 
 func loadDumpStatements(path string) ([]dumpStatement, []skippedDumpStatement, error) {
+	return loadDumpStatementsWithFilter(path, ignoredDumpStatementReason)
+}
+
+func loadSQLiteSeedDumpStatements(path string) ([]dumpStatement, []skippedDumpStatement, error) {
+	return loadDumpStatementsWithFilter(path, ignoredSQLiteSeedDumpStatementReason)
+}
+
+func loadDumpStatementsWithFilter(path string, ignoredReason func(string) (string, bool)) ([]dumpStatement, []skippedDumpStatement, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err
 	}
 	if looksLikeSQLiteDatabaseFile(data) {
-		return nil, nil, errors.New("--from-dump expects a SQL dump, but the file looks like a SQLite .db database; use --from-file for an existing SQLite database")
+		return nil, nil, errors.New("--from-dump expects a SQL dump, but the file looks like a SQLite .db database; use `comwit databases create --from-file <path>` for an existing SQLite database")
 	}
 	statements, err := splitSQLDump(string(data))
 	if err != nil {
@@ -208,7 +216,7 @@ func loadDumpStatements(path string) ([]dumpStatement, []skippedDumpStatement, e
 	filtered := make([]dumpStatement, 0, len(statements))
 	var skipped []skippedDumpStatement
 	for _, statement := range statements {
-		if reason, ok := ignoredDumpStatementReason(statement.SQL); ok {
+		if reason, ok := ignoredReason(statement.SQL); ok {
 			skipped = append(skipped, skippedDumpStatement{Index: statement.Index, Reason: reason})
 			continue
 		}
@@ -438,21 +446,31 @@ func isTransactionControlStatement(sql string) bool {
 	if len(words) == 0 {
 		return false
 	}
-	return words[0] == "begin" || words[0] == "commit" || words[0] == "end" || words[0] == "rollback"
+	return words[0] == "begin" || words[0] == "commit" || words[0] == "rollback"
 }
 
 func ignoredDumpStatementReason(sql string) (string, bool) {
+	if reason, ok := ignoredSQLiteSeedDumpStatementReason(sql); ok {
+		return reason, true
+	}
+	if isSQLiteSequenceMaintenanceStatement(sql) {
+		return "ignored sqlite_sequence maintenance statement", true
+	}
+	return "", false
+}
+
+func ignoredSQLiteSeedDumpStatementReason(sql string) (string, bool) {
 	words := sqlLeadingWords(sql, 4)
 	if len(words) >= 2 && words[0] == "pragma" && words[1] == "defer_foreign_keys" {
 		return "ignored D1-specific PRAGMA defer_foreign_keys", true
 	}
-	if len(words) >= 3 && words[0] == "delete" && words[1] == "from" && words[2] == "sqlite_sequence" {
-		return "ignored sqlite_sequence maintenance statement", true
-	}
-	if len(words) >= 3 && words[0] == "insert" && words[1] == "into" && words[2] == "sqlite_sequence" {
-		return "ignored sqlite_sequence maintenance statement", true
-	}
 	return "", false
+}
+
+func isSQLiteSequenceMaintenanceStatement(sql string) bool {
+	words := sqlLeadingWords(sql, 3)
+	return len(words) >= 3 && words[2] == "sqlite_sequence" &&
+		(words[0] == "delete" && words[1] == "from" || words[0] == "insert" && words[1] == "into")
 }
 
 func sqlPreview(sql string) string {
