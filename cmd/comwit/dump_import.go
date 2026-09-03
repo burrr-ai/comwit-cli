@@ -150,32 +150,37 @@ func databaseImportDumpCommand(args []string, stdout io.Writer) error {
 	}
 
 	apiClient := newClient(cfg)
-	var created databaseCreateResponse
-	if err := apiClient.postJSON(projectDatabasesPath(projectID), map[string]string{"name": databaseName}, &created); err != nil {
+	connectionToken, err := databaseConnectionToken(cfg)
+	if err != nil {
 		return err
 	}
-	token := ""
-	if created.DatabaseToken != nil {
-		token = strings.TrimSpace(*created.DatabaseToken)
+	idempotencyKey, err := newUUIDv4()
+	if err != nil {
+		return fmt.Errorf("generate idempotency key: %w", err)
 	}
-	if strings.TrimSpace(created.DatabaseID) == "" || strings.TrimSpace(created.DatabaseURL) == "" || token == "" {
+	var created databaseCreateResponse
+	request := databaseCreateRequest{Name: databaseName, Authentication: "comwit"}
+	if err := apiClient.postJSONWithHeaders(projectDatabasesPath(projectID), request, map[string]string{"Idempotency-Key": idempotencyKey}, &created); err != nil {
+		return err
+	}
+	if strings.TrimSpace(created.DatabaseID) == "" || strings.TrimSpace(created.DatabaseURL) == "" {
 		if strings.TrimSpace(created.DatabaseID) != "" {
 			_ = apiClient.deleteJSON(projectDatabasePath(projectID, created.DatabaseID), nil)
 		}
-		return errors.New("database create response did not include database_id, database_url, and one-time database_token")
+		return errors.New("database create response did not include database_id and database_url")
 	}
 
 	fmt.Fprintf(stdout, "database\t%s\n", created.DatabaseID)
 	fmt.Fprintf(stdout, "url\t%s\n", created.DatabaseURL)
-	fmt.Fprintf(stdout, "token\t%s\n", token)
+	fmt.Fprintf(stdout, "token\t%s\n", connectionToken)
 	fmt.Fprintf(stdout, "statements\t%d\n", len(statements))
 	if len(skipped) > 0 {
 		printSkippedDumpStatements(stdout, skipped)
 	}
 	fmt.Fprintf(stdout, "batches\t%d\n", len(batches))
 
-	if err := replayDumpBatches(stdout, created.DatabaseURL, token, batches); err != nil {
-		_ = rollbackDumpImport(created.DatabaseURL, token)
+	if err := replayDumpBatches(stdout, created.DatabaseURL, connectionToken, batches); err != nil {
+		_ = rollbackDumpImport(created.DatabaseURL, connectionToken)
 		if *keepFailedDB {
 			fmt.Fprintf(stdout, "failed_database_preserved\t%s\n", created.DatabaseID)
 			return err

@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-func TestDatabasesCreateWithoutFileKeepsSynchronousRequest(t *testing.T) {
+func TestDatabasesCreateWithoutFileRequestsComwitAuthentication(t *testing.T) {
 	configureSeedTestCLI(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/projects/proj_1/databases" {
@@ -30,14 +30,12 @@ func TestDatabasesCreateWithoutFileKeepsSynchronousRequest(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		if key := r.Header.Get("Idempotency-Key"); key != "" {
-			t.Errorf("legacy create unexpectedly set Idempotency-Key %q", key)
-		}
+		assertUUIDv4(t, r.Header.Get("Idempotency-Key"))
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode create body: %v", err)
 		}
-		if len(body) != 1 || body["name"] != "plain" {
+		if len(body) != 2 || body["name"] != "plain" || body["authentication"] != "comwit" {
 			t.Errorf("create body = %#v", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -51,7 +49,7 @@ func TestDatabasesCreateWithoutFileKeepsSynchronousRequest(t *testing.T) {
 	if err := run([]string{"databases", "create", "--name", "plain"}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := stdout.String(); got != "db_plain\thttps://db.example/v1/db_plain\tcreated=true\ntoken\tplain-token\n" {
+	if got := stdout.String(); got != "db_plain\thttps://db.example/v1/db_plain\tcreated=true\ntoken\ttest-token\n" {
 		t.Fatalf("stdout = %q", got)
 	}
 }
@@ -168,7 +166,7 @@ func TestDatabasesCreateFromFileRunsThreeStepWorkflow(t *testing.T) {
 	if operationGets != 1 {
 		t.Fatalf("operation GETs = %d, want 1", operationGets)
 	}
-	for _, want := range []string{"database\tdb_seed", "url\t" + server.URL + "/v1/db_seed", "token\tone-time-token", "status\tawaiting_upload", "status\tqueued", "status\tsucceeded", "ready\tdb_seed"} {
+	for _, want := range []string{"database\tdb_seed", "url\t" + server.URL + "/v1/db_seed", "token\ttest-token", "status\tawaiting_upload", "status\tqueued", "status\tsucceeded", "ready\tdb_seed"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout missing %q: %q", want, stdout.String())
 		}
@@ -180,7 +178,7 @@ func TestDatabasesCreateFromFileRunsThreeStepWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(token) != "one-time-token\n" {
+	if string(token) != "test-token\n" || strings.Contains(stdout.String(), "one-time-token") {
 		t.Fatalf("token file = %q", token)
 	}
 	info, err := os.Stat(tokenPath)
@@ -906,7 +904,7 @@ func TestDatabasesCreateFromFileFailedOperationUsesMappedMessage(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.code) || !strings.Contains(err.Error(), tc.wantMessage) {
 				t.Fatalf("error = %v", err)
 			}
-			if !strings.Contains(stdout.String(), "token\tone-time-token") || !strings.Contains(stdout.String(), "status\tfailed") {
+			if !strings.Contains(stdout.String(), "token\ttest-token") || strings.Contains(stdout.String(), "one-time-token") || !strings.Contains(stdout.String(), "status\tfailed") {
 				t.Fatalf("stdout = %q", stdout.String())
 			}
 		})
@@ -998,7 +996,7 @@ func TestDatabasesCreateFromFileNoWaitPrintsStatusCommand(t *testing.T) {
 	}
 }
 
-func TestDatabasesCreateFromFileReplayExplainsMissingToken(t *testing.T) {
+func TestDatabasesCreateFromFileReplayUsesLoggedInToken(t *testing.T) {
 	configureSeedTestCLI(t)
 	fixture := createSQLiteSeedFixture(t, 0)
 	server := newSeedWorkflowServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1019,14 +1017,15 @@ func TestDatabasesCreateFromFileReplayExplainsMissingToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "token_status\tunavailable: idempotent replay, rotate the token after the operation succeeds") || !strings.Contains(stdout.String(), "token_out\tnot written (") {
+	if !strings.Contains(stdout.String(), "token\ttest-token") || !strings.Contains(stdout.String(), "token_out\t"+tokenPath) {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
-	if strings.Contains(stdout.String(), "token\t") {
-		t.Fatalf("replay emitted a credential-shaped token line: %q", stdout.String())
+	token, readErr := os.ReadFile(tokenPath)
+	if readErr != nil {
+		t.Fatal(readErr)
 	}
-	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
-		t.Fatalf("replay token file should not exist, stat err = %v", err)
+	if string(token) != "test-token\n" {
+		t.Fatalf("replay token file = %q", token)
 	}
 }
 
@@ -1221,14 +1220,14 @@ func TestDatabasesCreateFromFilePreservesTokenBeforeUploadFailure(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "SEED_DIGEST_MISMATCH") {
 		t.Fatalf("error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "token\tone-time-token") || !strings.Contains(stdout.String(), "token_out\t"+tokenPath) {
+	if !strings.Contains(stdout.String(), "token\ttest-token") || strings.Contains(stdout.String(), "one-time-token") || !strings.Contains(stdout.String(), "token_out\t"+tokenPath) {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	token, readErr := os.ReadFile(tokenPath)
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if string(token) != "one-time-token\n" {
+	if string(token) != "test-token\n" {
 		t.Fatalf("token file = %q", token)
 	}
 }

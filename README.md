@@ -63,12 +63,21 @@ comwit version
 `databases execute` and the PITR commands above are available in v0.1.6 and
 require the matching platform-api deployment.
 
+`databases create` requests Comwit authentication and prints the logged-in
+`cwt_` as the local connection token; it never exposes the deprecated Louhi
+tenant token. The token needs `database:connect`, and tokens issued before that
+scope existed must be replaced. Use a project-owned `cwp_` with only
+`database:connect` for a deployed workload instead of copying your personal
+token into app environment.
+
 `databases create --from-file` validates a standalone SQLite file, streams it
 with an exact content length, and waits for the new database to become ready.
 Use `--skip-local-checks` to omit the local integrity and foreign-key checks,
 `--idempotency-key` to resume a known attempt, or `--no-wait` to return after
-the upload is accepted; `--token-out` writes the one-time token with mode
-`0600`.
+the upload is accepted; `--token-out` writes the logged-in connection token
+with mode `0600`. Seed and restore creation remain hybrid compatibility flows
+in the current platform contract, but the CLI ignores their legacy token and
+uses the logged-in token for Gateway connections.
 
 `databases create --from-dump` converts a SQLite-compatible SQL dump into a
 temporary SQLite file with the built-in engine, then runs the same validation,
@@ -85,6 +94,8 @@ Storage lifecycle and public-access commands are available in v0.1.7 and
 require the matching Storage platform-api deployment.
 
 Get a `cwt_` token from the platform dashboard, or use `comwit login` (device flow).
+The device requests no explicit scope list; the console applies its current
+default scopes, including `database:connect` for write-capable users.
 SQL execution is remote by default and goes through the project-scoped Comwit
 API; use `--json` for the stable API result envelope. See the
 [full CLI guide](https://github.com/burrr-ai/comwit-cloud/blob/main/docs/guides/cli.md)

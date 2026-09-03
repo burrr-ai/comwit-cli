@@ -276,7 +276,7 @@ func TestDatabaseDeleteAndTokenRotateUseProjectScopedAPI(t *testing.T) {
 	if !sawDelete || !sawRotate {
 		t.Fatalf("sawDelete=%t sawRotate=%t", sawDelete, sawRotate)
 	}
-	if !strings.Contains(rotateOut.String(), "new-token") {
+	if !strings.Contains(rotateOut.String(), "token\ttest-token") || strings.Contains(rotateOut.String(), "new-token") {
 		t.Fatalf("rotate stdout = %q", rotateOut.String())
 	}
 }
@@ -396,13 +396,16 @@ func TestDatabasesImportDumpCreatesDatabaseAndReplaysHranaBatch(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body["name"] != "imported" {
+			if body["name"] != "imported" || body["authentication"] != "comwit" {
 				t.Fatalf("create body = %#v", body)
+			}
+			if key := r.Header.Get("Idempotency-Key"); key == "" {
+				t.Fatal("create omitted Idempotency-Key")
 			}
 			_, _ = w.Write([]byte(`{"database_id":"db_1","database_url":"` + serverURL(r) + `/v1/db_1","created":true,"database_token":"tenant-token"}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/db_1/v3/pipeline":
 			sawHrana = true
-			if got := r.Header.Get("Authorization"); got != "Bearer tenant-token" {
+			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 				t.Fatalf("database auth = %q", got)
 			}
 			var request hranaPipelineRequest
@@ -441,7 +444,7 @@ func TestDatabasesImportDumpCreatesDatabaseAndReplaysHranaBatch(t *testing.T) {
 	if !strings.Contains(stdout.String(), "imported\tdb_1") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "token\ttenant-token") {
+	if !strings.Contains(stdout.String(), "token\ttest-token") || strings.Contains(stdout.String(), "tenant-token") {
 		t.Fatalf("stdout missing token = %q", stdout.String())
 	}
 }
@@ -889,13 +892,17 @@ func TestDatabasesRestoreFlow(t *testing.T) {
 			_, _ = w.Write([]byte(`{"restore_points":[{"generation_id":"gen-1","created_at_ms":1000,"base_frame_no":0,"pinned":false,"precise_until_ms":null}],"aliases":[{"alias":"nightly","target_kind":"generation","target_value":"gen-1","created_at_ms":1000}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/proj_1/databases/db_1/restore":
 			var body struct {
-				RestoreTo map[string]any `json:"restore_to"`
-				Name      string         `json:"name"`
+				RestoreTo      map[string]any `json:"restore_to"`
+				Name           string         `json:"name"`
+				Authentication string         `json:"authentication"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
 			sawSelector = body.RestoreTo
+			if body.Authentication != "hybrid" {
+				t.Fatalf("authentication = %q", body.Authentication)
+			}
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"operation":{"operation_id":"op_1","type":"database_restore","status":"pending","resolved_restore_point":"gen-1"},"database":{"database_id":"db_1-pitr-x","name":"before","database_url":"https://db.example.test/v1/db_1-pitr-x","status":"creating"},"database_token":"restored-token"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/proj_1/databases/db_1/operations/op_1":
@@ -924,7 +931,7 @@ func TestDatabasesRestoreFlow(t *testing.T) {
 		t.Fatalf("selector = %+v", sawSelector)
 	}
 	out := restoreOut.String()
-	for _, want := range []string{"op_1", "db_1-pitr-x", "restored-token", "succeeded"} {
+	for _, want := range []string{"op_1", "db_1-pitr-x", "token\ttest-token", "succeeded"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("restore stdout missing %q: %q", want, out)
 		}
@@ -933,7 +940,7 @@ func TestDatabasesRestoreFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(tokenData)) != "restored-token" {
+	if strings.TrimSpace(string(tokenData)) != "test-token" || strings.Contains(out, "restored-token") {
 		t.Fatalf("token file = %q", string(tokenData))
 	}
 }

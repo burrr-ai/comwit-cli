@@ -73,10 +73,10 @@ type buildsResponse struct {
 }
 
 type databaseCreateResponse struct {
-	DatabaseID    string  `json:"database_id"`
-	DatabaseURL   string  `json:"database_url"`
-	Created       bool    `json:"created"`
-	DatabaseToken *string `json:"database_token,omitempty"`
+	DatabaseID     string `json:"database_id"`
+	DatabaseURL    string `json:"database_url"`
+	Created        bool   `json:"created"`
+	Authentication string `json:"authentication"`
 }
 
 type databaseListItem struct {
@@ -102,10 +102,9 @@ type databaseOperationResponse struct {
 }
 
 type databaseTokenResponse struct {
-	DatabaseID    string `json:"database_id"`
-	DatabaseURL   string `json:"database_url"`
-	DatabaseToken string `json:"database_token"`
-	Status        string `json:"status"`
+	DatabaseID  string `json:"database_id"`
+	DatabaseURL string `json:"database_url"`
+	Status      string `json:"status"`
 }
 
 type domainDelegationView struct {
@@ -805,10 +804,15 @@ func databaseTokenCommand(args []string, stdout io.Writer) error {
 	if err := newClient(cfg).postJSON(projectDatabasePath(projectID, databaseID)+"/token/rotate", map[string]string{}, &body); err != nil {
 		return err
 	}
+	connectionToken, err := databaseConnectionToken(cfg)
+	if err != nil {
+		return err
+	}
 	fmt.Fprintf(stdout, "database\t%s\n", body.DatabaseID)
 	fmt.Fprintf(stdout, "url\t%s\n", body.DatabaseURL)
 	fmt.Fprintf(stdout, "status\t%s\n", body.Status)
-	fmt.Fprintf(stdout, "token\t%s\n", body.DatabaseToken)
+	fmt.Fprintln(stdout, "legacy_token\trotated; replacement not exposed")
+	fmt.Fprintf(stdout, "token\t%s\n", connectionToken)
 	return nil
 }
 
@@ -1545,11 +1549,15 @@ func (c *client) getJSON(path string, out any) error {
 }
 
 func (c *client) postJSON(path string, payload any, out any) error {
+	return c.postJSONWithHeaders(path, payload, nil, out)
+}
+
+func (c *client) postJSONWithHeaders(path string, payload any, headers map[string]string, out any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	return c.do(http.MethodPost, path, data, "application/json", out)
+	return c.doWithHeaders(http.MethodPost, path, data, "application/json", headers, out)
 }
 
 func (c *client) putJSON(path string, payload any, out any) error {
@@ -1604,6 +1612,10 @@ func (c *client) postPublic(path string, payload any, out any) error {
 }
 
 func (c *client) do(method, path string, body []byte, contentType string, out any) error {
+	return c.doWithHeaders(method, path, body, contentType, nil, out)
+}
+
+func (c *client) doWithHeaders(method, path string, body []byte, contentType string, headers map[string]string, out any) error {
 	if strings.TrimSpace(c.token) == "" {
 		return errors.New("not logged in; run `comwit login --token <token>`")
 	}
@@ -1614,6 +1626,9 @@ func (c *client) do(method, path string, body []byte, contentType string, out an
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.token))
 	if body != nil {
 		req.Header.Set("Content-Type", contentType)
+	}
+	for name, value := range headers {
+		req.Header.Set(name, value)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -1731,6 +1746,14 @@ func defaultProject(cfg configFile) string {
 		return project
 	}
 	return strings.TrimSpace(cfg.DefaultProject)
+}
+
+func databaseConnectionToken(cfg configFile) (string, error) {
+	token := strings.TrimSpace(cfg.Token)
+	if token == "" {
+		return "", errors.New("not logged in; run `comwit login`")
+	}
+	return token, nil
 }
 
 func domainCommandContext(project, domain string) (configFile, string, string, error) {
