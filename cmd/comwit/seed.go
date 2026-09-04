@@ -57,6 +57,11 @@ type databaseSeedCreateRequest struct {
 	Source databaseSeedSource `json:"source"`
 }
 
+type databaseCreateRequest struct {
+	Name           string `json:"name"`
+	Authentication string `json:"authentication"`
+}
+
 type databaseAsyncOperationError struct {
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
@@ -96,12 +101,12 @@ type databaseAsyncOperation struct {
 }
 
 type databaseSeedCreateResponse struct {
-	DatabaseID    string                 `json:"database_id"`
-	DatabaseURL   string                 `json:"database_url"`
-	Created       bool                   `json:"created"`
-	DatabaseToken *string                `json:"database_token"`
-	Operation     databaseAsyncOperation `json:"operation"`
-	UploadPath    string                 `json:"upload_path"`
+	DatabaseID     string                 `json:"database_id"`
+	DatabaseURL    string                 `json:"database_url"`
+	Created        bool                   `json:"created"`
+	Authentication string                 `json:"authentication"`
+	Operation      databaseAsyncOperation `json:"operation"`
+	UploadPath     string                 `json:"upload_path"`
 }
 
 type convertedSQLiteSeedFile struct {
@@ -127,9 +132,9 @@ func databaseCreateCommand(args []string, stdout, stderr io.Writer) (returnErr e
 	fromFile := fs.String("from-file", "", "create the database from this SQLite file")
 	fromDump := fs.String("from-dump", "", "convert this SQL dump locally and create the database from it")
 	sqliteOut := fs.String("sqlite-out", "", "keep the SQLite file converted from --from-dump at this path")
-	tokenOut := fs.String("token-out", "", "write the database's one-time token to this file (0600)")
+	tokenOut := fs.String("token-out", "", "write the logged-in database connection token to this file (0600)")
 	skipLocalChecks := fs.Bool("skip-local-checks", false, "skip local SQLite integrity and foreign-key checks")
-	idempotencyKey := fs.String("idempotency-key", "", "stable key for safely retrying file-based creation")
+	idempotencyKey := fs.String("idempotency-key", "", "stable key for safely retrying database creation")
 	noWait := fs.Bool("no-wait", false, "return after the upload is accepted instead of waiting until ready")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -156,19 +161,32 @@ func databaseCreateCommand(args []string, stdout, stderr io.Writer) (returnErr e
 	if databaseName == "" {
 		return errors.New("--name is required")
 	}
+	connectionToken, err := databaseConnectionToken(cfg)
+	if err != nil {
+		return err
+	}
 
 	if *fromFile == "" && *fromDump == "" {
-		if strings.TrimSpace(*tokenOut) != "" || *skipLocalChecks || *idempotencyKey != "" || *noWait {
-			return errors.New("--token-out, --skip-local-checks, --idempotency-key, and --no-wait require --from-file or --from-dump")
+		if strings.TrimSpace(*tokenOut) != "" || *skipLocalChecks || *noWait {
+			return errors.New("--token-out, --skip-local-checks, and --no-wait require --from-file or --from-dump")
+		}
+		key := strings.TrimSpace(*idempotencyKey)
+		if key == "" {
+			key, err = newUUIDv4()
+			if err != nil {
+				return fmt.Errorf("generate idempotency key: %w", err)
+			}
+		}
+		if err := validateComwitDatabaseIdempotencyKey(key); err != nil {
+			return err
 		}
 		var body databaseCreateResponse
-		if err := newClient(cfg).postJSON(projectDatabasesPath(projectID), map[string]string{"name": databaseName}, &body); err != nil {
+		request := databaseCreateRequest{Name: databaseName, Authentication: "comwit"}
+		if err := newClient(cfg).postJSONWithHeaders(projectDatabasesPath(projectID), request, map[string]string{"Idempotency-Key": key}, &body); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "%s\t%s\tcreated=%t\n", body.DatabaseID, body.DatabaseURL, body.Created)
-		if body.DatabaseToken != nil && strings.TrimSpace(*body.DatabaseToken) != "" {
-			fmt.Fprintf(stdout, "token\t%s\n", *body.DatabaseToken)
-		}
+		fmt.Fprintf(stdout, "token\t%s\n", connectionToken)
 		return nil
 	}
 
@@ -235,28 +253,18 @@ func databaseCreateCommand(args []string, stdout, stderr io.Writer) (returnErr e
 		return err
 	}
 
-	// The token is one-time output. Print and persist it before validating the
-	// follow-up fields or starting the upload, so a later failure cannot hide it.
+	// Seed creation is still a server-side hybrid compatibility flow, but local
+	// connections authenticate to the Database Gateway with the logged-in token.
+	// Never expose the deprecated Louhi token returned by an older API response.
 	fmt.Fprintf(stdout, "database\t%s\n", created.DatabaseID)
 	fmt.Fprintf(stdout, "url\t%s\n", created.DatabaseURL)
 	fmt.Fprintf(stdout, "created\t%t\n", created.Created)
-	token := ""
-	if created.DatabaseToken != nil {
-		token = strings.TrimSpace(*created.DatabaseToken)
-	}
-	if token != "" {
-		fmt.Fprintf(stdout, "token\t%s\n", token)
-		if tokenPath != "" {
-			if err := writeTokenOut(tokenPath, token); err != nil {
-				return fmt.Errorf("write token to %s: %w", tokenPath, err)
-			}
-			fmt.Fprintf(stdout, "token_out\t%s\n", tokenPath)
+	fmt.Fprintf(stdout, "token\t%s\n", connectionToken)
+	if tokenPath != "" {
+		if err := writeTokenOut(tokenPath, connectionToken); err != nil {
+			return fmt.Errorf("write token to %s: %w", tokenPath, err)
 		}
-	} else {
-		fmt.Fprintln(stdout, "token_status\tunavailable: idempotent replay, rotate the token after the operation succeeds")
-		if tokenPath != "" {
-			fmt.Fprintln(stdout, "token_out\tnot written (one-time token unavailable on idempotent replay)")
-		}
+		fmt.Fprintf(stdout, "token_out\t%s\n", tokenPath)
 	}
 	fmt.Fprintf(stdout, "operation\t%s\n", created.Operation.OperationID)
 	lastStatus := ""
@@ -575,6 +583,18 @@ func validateSeedIdempotencyKey(key string) error {
 	for _, r := range key {
 		if r < 0x20 || r > 0x7e {
 			return errors.New("--idempotency-key must contain 1 to 128 printable ASCII characters")
+		}
+	}
+	return nil
+}
+
+func validateComwitDatabaseIdempotencyKey(key string) error {
+	if len(key) < 8 || len(key) > 200 {
+		return errors.New("--idempotency-key must contain 8 to 200 printable ASCII characters")
+	}
+	for _, r := range key {
+		if r < 0x20 || r > 0x7e {
+			return errors.New("--idempotency-key must contain 8 to 200 printable ASCII characters")
 		}
 	}
 	return nil

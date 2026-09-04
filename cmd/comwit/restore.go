@@ -56,9 +56,8 @@ type restoredDatabaseView struct {
 }
 
 type restoreResponse struct {
-	Operation     restoreOperationItem `json:"operation"`
-	Database      restoredDatabaseView `json:"database"`
-	DatabaseToken *string              `json:"database_token,omitempty"`
+	Operation restoreOperationItem `json:"operation"`
+	Database  restoredDatabaseView `json:"database"`
 }
 
 type restoreOperationResponse struct {
@@ -116,7 +115,7 @@ func databaseRestoreCommand(args []string, stdout io.Writer) error {
 	generation := fs.String("generation", "", "restore point generation id")
 	alias := fs.String("alias", "", "restore point alias")
 	name := fs.String("name", "", "display name for the restored database")
-	tokenOut := fs.String("token-out", "", "write the restored database's one-time token to this file (0600)")
+	tokenOut := fs.String("token-out", "", "write the logged-in database connection token to this file (0600)")
 	wait := fs.Bool("wait", false, "poll the restore operation until it succeeds or fails")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -129,12 +128,18 @@ func databaseRestoreCommand(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{"restore_to": selector}
+	// Restore remains an explicitly hybrid compatibility flow until the
+	// platform owns a durable idempotent Comwit-authenticated restore intent.
+	payload := map[string]any{"restore_to": selector, "authentication": "hybrid"}
 	if trimmed := strings.TrimSpace(*name); trimmed != "" {
 		payload["name"] = trimmed
 	}
 
 	client := newClient(cfg)
+	connectionToken, err := databaseConnectionToken(cfg)
+	if err != nil {
+		return err
+	}
 	var body restoreResponse
 	if err := client.postJSON(projectDatabaseRestorePath(projectID, databaseID), payload, &body); err != nil {
 		return err
@@ -144,18 +149,12 @@ func databaseRestoreCommand(args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "status\t%s\n", body.Operation.Status)
 	fmt.Fprintf(stdout, "database\t%s\n", body.Database.DatabaseID)
 	fmt.Fprintf(stdout, "url\t%s\n", body.Database.DatabaseURL)
-	token := ""
-	if body.DatabaseToken != nil {
-		token = strings.TrimSpace(*body.DatabaseToken)
-	}
-	if token != "" {
-		fmt.Fprintf(stdout, "token\t%s\n", token)
-		if path := strings.TrimSpace(*tokenOut); path != "" {
-			if err := writeTokenOut(path, token); err != nil {
-				return fmt.Errorf("write token to %s: %w", path, err)
-			}
-			fmt.Fprintf(stdout, "token_out\t%s\n", path)
+	fmt.Fprintf(stdout, "token\t%s\n", connectionToken)
+	if path := strings.TrimSpace(*tokenOut); path != "" {
+		if err := writeTokenOut(path, connectionToken); err != nil {
+			return fmt.Errorf("write token to %s: %w", path, err)
 		}
+		fmt.Fprintf(stdout, "token_out\t%s\n", path)
 	}
 
 	if *wait {
