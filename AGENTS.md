@@ -82,8 +82,11 @@ go test ./...
 npm test
 ```
 
-For release changes, inspect `release.sh` and `publish-npm.sh`, run
-`npm pack --dry-run`, and verify the generated artifacts. Publish with
-`./release.sh vX.Y.Z`; it owns the synchronized GitHub Release and npm package.
-Use `./publish-npm.sh vX.Y.Z` only to repair a missing npm mirror for an existing
-GitHub release.
+For release changes, inspect `.github/workflows/release.yml` and
+`npm/scripts/release.mjs`, run `node --test npm/scripts/release.test.mjs`,
+`npm run release:pack -- . vX.Y.Z "$(git rev-parse HEAD)"`, and
+`npm pack --dry-run --ignore-scripts`, then verify the generated artifacts.
+Publication and repair belong to the protected-main CLI release workflow;
+see README for App/OIDC setup and the explicit `publish_npm` input.
+Local packaging never publishes. Do not restore the retired ambient-credential
+`release.sh` or `publish-npm.sh` publication paths.

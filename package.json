@@ -27,10 +27,9 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node npm/scripts/verify.mjs",
+    "test": "go test ./... && node npm/scripts/verify.mjs && node --test npm/scripts/release.test.mjs",
     "build:npm": "node npm/scripts/build.mjs",
-    "prepublishOnly": "npm test",
-    "prepack": "npm run build:npm"
+    "release:pack": "node npm/scripts/release.mjs pack"
   },
   "publishConfig": {
     "access": "public"

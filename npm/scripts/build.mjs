@@ -1,17 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { verifyVersion } from "./version.mjs";
 
-const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const repositoryRoot = path.resolve(scriptDir, "..", "..");
-const outputDir = path.join(repositoryRoot, "npm", "dist");
-const goBinary = process.env.GO || "go";
-const version = verifyVersion(repositoryRoot);
-const targets = [
+export const targets = [
   { goos: "darwin", goarch: "amd64", output: "comwit-darwin-x64" },
   { goos: "darwin", goarch: "arm64", output: "comwit-darwin-arm64" },
   { goos: "linux", goarch: "amd64", output: "comwit-linux-x64" },
@@ -20,48 +14,31 @@ const targets = [
   { goos: "windows", goarch: "arm64", output: "comwit-win32-arm64.exe" }
 ];
 
-rmSync(outputDir, { recursive: true, force: true });
-mkdirSync(outputDir, { recursive: true });
-console.log(`building comwit ${version} npm binaries`);
-
-const managedCacheRoot = process.env.GOCACHE
-  ? null
-  : mkdtempSync(path.join(tmpdir(), "comwit-npm-go-cache-"));
-
-try {
+export function buildBinaries(repositoryRoot, run = execFileSync) {
+  const version = verifyVersion(repositoryRoot);
+  const outputDir = path.join(repositoryRoot, "npm", "dist");
+  const goBinary = process.env.GO || "go";
+  // Go's cache already keys on OS/architecture. Keep one cache for all targets
+  // and the preceding tests; never delete it between compiler invocations.
+  const cache = process.env.GOCACHE || run(goBinary, ["env", "GOCACHE"], {
+    encoding: "utf8"
+  }).trim();
+  rmSync(outputDir, { recursive: true, force: true });
+  mkdirSync(outputDir, { recursive: true });
+  console.log(`building comwit ${version}: six targets with one GOCACHE`);
   for (const target of targets) {
     const outputPath = path.join(outputDir, target.output);
-    const targetCache = managedCacheRoot
-      ? path.join(managedCacheRoot, `${target.goos}-${target.goarch}`)
-      : process.env.GOCACHE;
-    if (managedCacheRoot) {
-      mkdirSync(targetCache, { recursive: true });
-    }
-    console.log(`building npm binary ${target.goos}/${target.goarch}`);
-    execFileSync(
-      goBinary,
-      ["build", "-trimpath", "-ldflags=-s -w", "-o", outputPath, "./cmd/comwit"],
-      {
-        cwd: repositoryRoot,
-        env: {
-          ...process.env,
-          CGO_ENABLED: "0",
-          GOCACHE: targetCache,
-          GOOS: target.goos,
-          GOARCH: target.goarch
-        },
-        stdio: "inherit"
-      }
-    );
-    if (target.goos !== "windows") {
-      chmodSync(outputPath, 0o755);
-    }
-    if (managedCacheRoot) {
-      rmSync(targetCache, { recursive: true, force: true });
-    }
+    run(goBinary, ["build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w",
+      "-o", outputPath, "./cmd/comwit"], {
+      cwd: repositoryRoot,
+      env: { ...process.env, CGO_ENABLED: "0", GOCACHE: cache,
+        GOOS: target.goos, GOARCH: target.goarch },
+      stdio: "inherit"
+    });
+    chmodSync(outputPath, 0o755);
   }
-} finally {
-  if (managedCacheRoot) {
-    rmSync(managedCacheRoot, { recursive: true, force: true });
-  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  buildBinaries(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".."));
 }
