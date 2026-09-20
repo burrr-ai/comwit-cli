@@ -1,0 +1,145 @@
+name: CLI release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release or repair (vX.Y.Z)
+        required: true
+        type: string
+      publish_npm:
+        description: Publish npm using the configured trusted publisher
+        type: boolean
+        default: false
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.workflow }}-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Qualify and package
+    # App-created tags from a dispatch must not start a second six-target build.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' && !github.event.deleted && github.actor != 'burrr-ai-release-automation[bot]')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.source.outputs.version }}
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Admit only protected main source
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" == true ]]
+          git merge-base --is-ancestor HEAD origin/main
+          if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+            source_sha=$(git rev-parse "refs/tags/$VERSION^{commit}")
+          else
+            [[ "$EVENT_NAME" == workflow_dispatch ]]
+            source_sha=$EVENT_SHA
+          fi
+          if [[ "$EVENT_NAME" == push ]]; then
+            [[ "$source_sha" == "$(git rev-parse "$EVENT_SHA^{commit}")" ]]
+          fi
+          git merge-base --is-ancestor "$source_sha" origin/main
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "GOCACHE=$RUNNER_TEMP/comwit-release-go-cache" >> "$GITHUB_ENV"
+      # Helpers stay at the workflow commit; old release tags are source only.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: source/go.mod
+          # Share the job-local cache with tests and all targets. No PR caches.
+          cache: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Pin npm with OIDC support
+        run: npm install --global npm@11.17.0 --ignore-scripts
+      - run: node npm/scripts/verify.mjs source
+      - run: go test ./...
+        working-directory: source
+      - run: node --test npm/scripts/release.test.mjs
+      - name: Reuse an existing qualified release for repair
+        id: restore
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.source.outputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: node npm/scripts/release.mjs restore source/dist "$VERSION" "$SOURCE_SHA"
+      - name: Build six targets once and package both channels
+        if: steps.restore.outputs.restored != 'true'
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: node npm/scripts/release.mjs pack source "$VERSION" "$SOURCE_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-release-${{ steps.source.outputs.sha }}
+          path: source/dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+  publish:
+    name: Publish or repair
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cli-release-${{ needs.build.outputs.sha }}
+          path: dist
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm install --global npm@11.17.0 --ignore-scripts
+      - name: Verify downloaded artifacts before minting credentials
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_SHA: ${{ needs.build.outputs.sha }}
+        run: node npm/scripts/release.mjs verify dist "$VERSION" "$SOURCE_SHA"
+      - name: Mint repository-scoped release-automation token
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.COMWIT_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.COMWIT_RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Publish exact qualified artifacts
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_SHA: ${{ needs.build.outputs.sha }}
+          PUBLISH_NPM: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_npm }}
+        run: node npm/scripts/release.mjs publish dist "$VERSION" "$SOURCE_SHA"

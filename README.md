@@ -103,13 +103,68 @@ for Storage/S3 setup, query limits, PITR, domains, apps, and deploy workflows.
 
 ## Releasing
 
+The **CLI release** workflow (`.github/workflows/release.yml`) owns publication.
+Merge matching versions in `cmd/comwit/main.go` and `package.json` into protected
+`main`, then dispatch from `main`:
+
 ```sh
-GO=/path/to/go ./release.sh vX.Y.Z
+gh workflow run release.yml --ref main -f version=vX.Y.Z
 ```
 
-`release.sh` requires GitHub CLI and npm authentication up front, verifies the
-Go and npm versions, runs the tests, publishes the darwin/linux GitHub assets
-with `checksums.txt`, and publishes the same version to npm. It is safe to rerun
-when the GitHub Release already exists at the current commit or the npm version
-is already published. To repair only a missing npm mirror, run
-`./publish-npm.sh vX.Y.Z`.
+Pushing a `vX.Y.Z` tag also releases its exact commit, provided that commit is
+on protected `main`. A dispatch uses an existing tag's commit for repair, or the
+dispatch's main commit for a new version. Annotated tags are supported; a moved
+tag or mismatched version is rejected. App-created tags during dispatch do not
+start another build.
+
+The workflow runs Go tests once, validates version identity, and builds the six
+darwin/linux/windows × amd64/arm64 targets once with a shared Go cache. It packages
+the four installer-compatible GitHub tarballs and the npm tarball from those same
+binaries, then verifies their hashes and contents. Lifecycle scripts are disabled
+for packing and publication. The GitHub release includes `checksums.txt`, the npm
+tarball, and `release.json` with the source SHA and asset/binary hashes. Publication
+uses a repository-scoped release-automation App token; the workflow's built-in
+GitHub token has read-only repository access.
+
+One-time setup before the first release:
+
+1. Protect `main` with required review and the `CLI tests` check. The workflow
+   checks GitHub's branch protection status and fails closed if it is absent.
+   Limit release-tag creation to maintainers and the release App.
+2. Expose `COMWIT_RELEASE_APP_CLIENT_ID` and `COMWIT_RELEASE_APP_PRIVATE_KEY` as
+   Actions secrets, with the App installed on this repository and Contents write
+   permission.
+3. In the npm `comwit-cli` package settings, configure a
+   [GitHub Actions trusted publisher](https://docs.npmjs.com/trusted-publishers/)
+   for organization `burrr-ai`, repository `comwit-cli`, workflow filename
+   `release.yml`, and no environment name. Enable direct `npm publish` for this
+   publisher. The workflow uses Node 24, npm 11.17.0, and `id-token: write`; no
+   npm token is needed.
+
+npm publication is disabled by default, including for tag pushes. After the
+trusted publisher is configured, publish both channels or repair the npm mirror:
+
+```sh
+gh workflow run release.yml --ref main -f version=vX.Y.Z -f publish_npm=true
+```
+
+For a failed publication, use **Re-run failed jobs**: the publish job downloads
+the original qualified artifact (retained for 90 days) without testing or
+compiling again. A later dispatch can restore the complete bundle from the GitHub
+release, also without recompiling. Missing assets are uploaded; matching assets
+and matching npm versions are verified and skipped. Conflicting existing bytes
+fail rather than being overwritten. Legacy or incomplete releases without a
+complete bundle are rebuilt once and checked against any existing assets; if
+historical assets differ, retain those assets and release a new version instead.
+
+For local validation without publishing:
+
+```sh
+npm test
+npm run release:pack -- . vX.Y.Z "$(git rev-parse HEAD)"
+npm pack --dry-run --ignore-scripts
+```
+
+The packaging command writes ignored `npm/dist/` binaries and `dist/` archives,
+verifies all six npm binaries and all four GitHub/npm binary pairs, and never
+publishes. `release.sh` and `publish-npm.sh` have been retired.
