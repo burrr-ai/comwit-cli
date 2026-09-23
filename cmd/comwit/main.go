@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	version             = "0.1.8"
+	version             = "0.1.9"
 	defaultAPIURL       = "https://api.cloud.comwit.io"
 	defaultGitHubAPIURL = "https://api.github.com"
 	defaultGitHubRepo   = "burrr-ai/comwit-cli"
