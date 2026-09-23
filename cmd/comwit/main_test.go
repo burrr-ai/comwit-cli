@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,90 @@ func TestVersionCommand(t *testing.T) {
 	}
 	if got := stdout.String(); !strings.Contains(got, "comwit") {
 		t.Fatalf("stdout = %q", got)
+	}
+}
+
+func TestDeployUploadDeadline(t *testing.T) {
+	tests := []struct {
+		name string
+		size int64
+		want time.Duration
+	}{
+		{"empty", 0, 5 * time.Minute},
+		{"under one chunk", 1, 6 * time.Minute},
+		{"one chunk", 50_000_000, 6 * time.Minute},
+		{"over one chunk", 50_000_001, 7 * time.Minute},
+		{"incident package", 495_000_000, 15 * time.Minute},
+		{"capped", 3_000_000_000, 60 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deployUploadDeadline(tt.size); got != tt.want {
+				t.Fatalf("deadline for %d bytes = %s, want %s", tt.size, got, tt.want)
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestDeployUploadStreamsFileWithContentLength(t *testing.T) {
+	data := []byte("packaged app bytes")
+	path := filepath.Join(t.TempDir(), "app.tar.zst")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/projects/proj_1/apps/svc_1/deployments" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-token" || r.Header.Get("Content-Type") != "application/octet-stream" {
+			t.Errorf("unexpected headers: %v", r.Header)
+		}
+		if r.ContentLength != int64(len(data)) || len(r.TransferEncoding) != 0 {
+			t.Errorf("content length = %d, transfer encoding = %v", r.ContentLength, r.TransferEncoding)
+		}
+		got, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		if !bytes.Equal(got, data) {
+			t.Errorf("body = %q, want %q", got, data)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"app_id":"svc_1","build_id":"bld_1","uploaded":true}`))
+	}))
+	defer server.Close()
+
+	httpClient := newDeployUploadHTTPClient()
+	defer httpClient.CloseIdleConnections()
+	base := httpClient.Transport
+	httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Body != source || req.GetBody != nil {
+			t.Errorf("deploy request must stream the open file directly")
+		}
+		if req.ContentLength != int64(len(data)) {
+			t.Errorf("request content length = %d", req.ContentLength)
+		}
+		return base.RoundTrip(req)
+	})
+	c := &client{apiURL: server.URL, token: "test-token", httpClient: httpClient}
+	var response deployResponse
+	if err := c.postDeployUpload("/v1/projects/proj_1/apps/svc_1/deployments", source, int64(len(data)), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.AppID != "svc_1" || response.BuildID != "bld_1" || !response.Uploaded {
+		t.Fatalf("response = %+v", response)
 	}
 }
 
