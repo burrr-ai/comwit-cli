@@ -232,7 +232,8 @@ test("workflow contract: open PRs, one test/build pass, protected source, App an
   assert.match(release, /GOCACHE=\$RUNNER_TEMP\/comwit-release-go-cache/);
   assert.match(release, /needs: build/);
   assert.match(release, /id-token: write/);
-  assert.match(release, /secrets.COMWIT_RELEASE_APP_CLIENT_ID/);
+  assert.match(release, /- name: Require release App client ID\n\s+env:\n\s+APP_CLIENT_ID: \$\{\{ vars\.COMWIT_RELEASE_APP_CLIENT_ID \}\}\n\s+run: \|\n\s+if \[\[ -z "\$APP_CLIENT_ID" \]\]; then\n\s+echo "::error::Set the COMWIT_RELEASE_APP_CLIENT_ID organization variable"\n\s+exit 1\n\s+fi/);
+  assert.match(release, /app-id: \$\{\{ vars\.COMWIT_RELEASE_APP_CLIENT_ID \}\}/);
   assert.match(release, /permission-contents: write/);
   assert.match(release, /default: false/);
   assert.match(release, /PUBLISH_NPM: .*inputs.publish_npm/);
