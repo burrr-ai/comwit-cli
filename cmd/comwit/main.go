@@ -4,11 +4,13 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1478,7 +1480,12 @@ func deploy(args []string, stdout, stderr io.Writer) error {
 	if cleanup != nil {
 		defer cleanup()
 	}
-	data, err := os.ReadFile(packagePath)
+	source, err := os.Open(packagePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	info, err := source.Stat()
 	if err != nil {
 		return err
 	}
@@ -1499,12 +1506,76 @@ func deploy(args []string, stdout, stderr io.Writer) error {
 	}
 
 	var body deployResponse
-	if err := newClient(cfg).postRaw(path, data, &body); err != nil {
+	c := newClient(cfg)
+	if strings.TrimSpace(c.token) == "" {
+		return errors.New("not logged in; run `comwit login --token <token>`")
+	}
+	fmt.Fprintf(stderr, "uploading package (%.1f MB)\n", float64(info.Size())/1_000_000)
+	c.httpClient = newDeployUploadHTTPClient()
+	defer c.httpClient.CloseIdleConnections()
+	if err := c.postDeployUpload(path, source, info.Size(), &body); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "deployed app=%s build=%s uploaded=%t\n", body.AppID, body.BuildID, body.Uploaded)
 	if len(body.Hosts) > 0 {
 		fmt.Fprintf(stdout, "hosts=%s\n", strings.Join(body.Hosts, ","))
+	}
+	return nil
+}
+
+func deployUploadDeadline(size int64) time.Duration {
+	const chunkSize = 50_000_000
+	if size <= 0 {
+		return 5 * time.Minute
+	}
+	chunks := size / chunkSize
+	if size%chunkSize != 0 {
+		chunks++
+	}
+	if chunks >= 55 {
+		return 60 * time.Minute
+	}
+	return time.Duration(5+chunks) * time.Minute
+}
+
+func newDeployUploadHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ResponseHeaderTimeout = 10 * time.Minute
+	return &http.Client{Transport: transport}
+}
+
+func (c *client) postDeployUpload(path string, source *os.File, size int64, out any) error {
+	if strings.TrimSpace(c.token) == "" {
+		return errors.New("not logged in; run `comwit login --token <token>`")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deployUploadDeadline(size))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL+path, source)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.token))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return newAPIError(resp.StatusCode, data)
+	}
+	if out == nil || len(data) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("decode API response: %w", err)
 	}
 	return nil
 }
