@@ -10,10 +10,23 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func init() {
+	if os.Getenv("COMWIT_FAKE_GIT") != "1" {
+		return
+	}
+	args, err := json.Marshal(os.Args[1:])
+	if err != nil || os.WriteFile(os.Getenv("COMWIT_FAKE_GIT_LOG"), args, 0o600) != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
 
 func TestVersionCommand(t *testing.T) {
 	var stdout bytes.Buffer
@@ -112,10 +125,16 @@ func TestDeployUploadStreamsFileWithContentLength(t *testing.T) {
 func TestLoginWritesConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	t.Setenv("COMWIT_API_URL", "")
+	gitLog := fakeGitOnPath(t)
 
 	var stdout bytes.Buffer
-	if err := run([]string{"login", "--token", "test-token", "--project", "proj_1"}, &stdout, &bytes.Buffer{}); err != nil {
+	var stderr bytes.Buffer
+	if err := run([]string{"login", "--token", "test-token", "--project", "proj_1"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 
 	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
@@ -128,6 +147,156 @@ func TestLoginWritesConfig(t *testing.T) {
 	}
 	if !strings.Contains(text, `"default_project": "proj_1"`) {
 		t.Fatalf("config missing project: %s", text)
+	}
+	if !strings.Contains(stdout.String(), "git access configured for git.cloud.comwit.io\n") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	gitArgs, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	if err := json.Unmarshal(gitArgs, &got); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"config", "--global", "credential.https://git.cloud.comwit.io.helper", gitCredentialHelperValue(executable)}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("git args = %q, want %q", got, want)
+	}
+}
+
+func fakeGitOnPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	name := "git"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	target, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(target, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Close(); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(dir, "git-args.json")
+	t.Setenv("COMWIT_FAKE_GIT", "1")
+	t.Setenv("COMWIT_FAKE_GIT_LOG", log)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+func TestGitCredentialProtocol(t *testing.T) {
+	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("COMWIT_API_URL", "")
+	if _, err := saveConfig(configFile{Token: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, operation, input, want string
+	}{
+		{"get", "get", "protocol=https\nhost=git.cloud.comwit.io\npath=project/repo.git\n\n", "username=comwit\npassword=test-token\n\n"},
+		{"get at EOF", "get", "protocol=https\nhost=git.cloud.comwit.io", "username=comwit\npassword=test-token\n\n"},
+		{"other host", "get", "protocol=https\nhost=github.com\n\n", ""},
+		{"other protocol", "get", "protocol=http\nhost=git.cloud.comwit.io\n\n", ""},
+		{"store", "store", "protocol=https\nhost=git.cloud.comwit.io\n\n", ""},
+		{"erase", "erase", "protocol=https\nhost=git.cloud.comwit.io\n\n", ""},
+		{"first record only", "get", "protocol=https\n\nhost=git.cloud.comwit.io\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			if err := gitCredential([]string{tt.operation}, strings.NewReader(tt.input), &stdout); err != nil {
+				t.Fatal(err)
+			}
+			if got := stdout.String(); got != tt.want {
+				t.Fatalf("stdout = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	if _, err := saveConfig(configFile{}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := gitCredential([]string{"get"}, strings.NewReader("protocol=https\nhost=git.cloud.comwit.io\n\n"), &stdout); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("not logged in stdout = %q", stdout.String())
+	}
+}
+
+func TestGitCredentialHost(t *testing.T) {
+	t.Setenv("COMWIT_API_URL", "")
+	if got := gitCredentialHost(); got != "git.cloud.comwit.io" {
+		t.Fatalf("default Git host = %q", got)
+	}
+	t.Setenv("COMWIT_API_URL", "https://api.staging.comwit.io/")
+	if got := gitCredentialHost(); got != "git.staging.comwit.io" {
+		t.Fatalf("staging Git host = %q", got)
+	}
+	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	if _, err := saveConfig(configFile{Token: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := gitCredential([]string{"get"}, strings.NewReader("protocol=https\nhost=git.staging.comwit.io\n\n"), &stdout); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "username=comwit\npassword=test-token\n\n" {
+		t.Fatalf("staging credential = %q", got)
+	}
+	t.Setenv("COMWIT_API_URL", "http://localhost:8080")
+	if got := gitCredentialHost(); got != "localhost:8080" {
+		t.Fatalf("local Git host = %q", got)
+	}
+}
+
+func TestGitCredentialHelperValue(t *testing.T) {
+	tests := []struct{ executable, want string }{
+		{"/Applications/Comwit CLI/comwit", "!'/Applications/Comwit CLI/comwit' git-credential"},
+		{`C:\Program Files\Comwit\comwit.exe`, `!'C:\Program Files\Comwit\comwit.exe' git-credential`},
+		{"/Users/O'Brien/comwit", "!'/Users/O'\\''Brien/comwit' git-credential"},
+	}
+	for _, tt := range tests {
+		if got := gitCredentialHelperValue(tt.executable); got != tt.want {
+			t.Errorf("helper value = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+func TestLoginWithoutGitStillSucceeds(t *testing.T) {
+	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("PATH", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"login", "--token", "test-token"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if got := stderr.String(); got != "warning: git not found on PATH; git access was not configured\n" {
+		t.Fatalf("stderr = %q", got)
+	}
+	if strings.Contains(stdout.String(), "git access configured") {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
 

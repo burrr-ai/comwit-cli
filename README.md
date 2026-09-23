@@ -60,6 +60,9 @@ comwit update                        # self-update to the latest release
 comwit version
 ```
 
+After `comwit login`, Git clone and push at `https://git.cloud.comwit.io/<project>/<repository>.git` use the CLI token without a prompt.
+Remove the helper with `git config --global --unset credential.https://git.cloud.comwit.io.helper`.
+
 `databases execute` and the PITR commands above are available in v0.1.6 and
 require the matching platform-api deployment.
 
