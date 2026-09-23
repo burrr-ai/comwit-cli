@@ -129,11 +129,19 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
           SOURCE_SHA: ${{ needs.build.outputs.sha }}
         run: node npm/scripts/release.mjs verify dist "$VERSION" "$SOURCE_SHA"
+      - name: Require release App client ID
+        env:
+          APP_CLIENT_ID: ${{ vars.COMWIT_RELEASE_APP_CLIENT_ID }}
+        run: |
+          if [[ -z "$APP_CLIENT_ID" ]]; then
+            echo "::error::Set the COMWIT_RELEASE_APP_CLIENT_ID organization variable"
+            exit 1
+          fi
       - name: Mint repository-scoped release-automation token
         id: app
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
-          app-id: ${{ secrets.COMWIT_RELEASE_APP_CLIENT_ID }}
+          app-id: ${{ vars.COMWIT_RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.COMWIT_RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
       - name: Publish exact qualified artifacts
