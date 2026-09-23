@@ -294,7 +294,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, "comwit", version)
 		return nil
 	case "login":
-		return login(args[1:], stdout)
+		return login(args[1:], stdout, stderr)
+	case "git-credential":
+		return gitCredential(args[1:], os.Stdin, stdout)
 	case "projects":
 		return projects(args[1:], stdout)
 	case "databases":
@@ -322,6 +324,7 @@ func usage(w io.Writer) {
   comwit version
   comwit login [--project <id>]               (browser device login)
   comwit login --token <token> [--project <id>]
+  comwit git-credential <get|store|erase>     (Git credential helper)
   comwit projects list
   comwit databases create --project <id> --name <name> [--from-file <path> | --from-dump <path> [--sqlite-out <path>]] [--token-out <path> --skip-local-checks --idempotency-key <key> --no-wait]
   comwit databases import-dump --project <id> --name <name> --from-dump dump.sql [--keep-failed-db]
@@ -623,7 +626,7 @@ func replaceBinaryFromTarGz(r io.Reader, targetPath string) error {
 	return nil
 }
 
-func login(args []string, stdout io.Writer) error {
+func login(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	token := fs.String("token", "", "API token")
 	project := fs.String("project", "", "default project id")
@@ -631,7 +634,7 @@ func login(args []string, stdout io.Writer) error {
 		return err
 	}
 	if strings.TrimSpace(*token) == "" {
-		return deviceLogin(stdout, strings.TrimSpace(*project))
+		return deviceLogin(stdout, stderr, strings.TrimSpace(*project))
 	}
 
 	cfg := configFile{
@@ -643,6 +646,7 @@ func login(args []string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "Saved credentials to %s\n", path)
+	configureGitCredentialHelper(stdout, stderr)
 	return nil
 }
 
@@ -659,7 +663,7 @@ type devicePollResponse struct {
 	Token  string `json:"token"`
 }
 
-func deviceLogin(stdout io.Writer, project string) error {
+func deviceLogin(stdout, stderr io.Writer, project string) error {
 	c := &client{apiURL: apiURL(), httpClient: &http.Client{Timeout: 30 * time.Second}}
 
 	var start deviceStartResponse
@@ -695,6 +699,7 @@ func deviceLogin(stdout io.Writer, project string) error {
 				return err
 			}
 			fmt.Fprintf(stdout, "Logged in. Saved credentials to %s\n", path)
+			configureGitCredentialHelper(stdout, stderr)
 			return nil
 		case "pending":
 			continue
