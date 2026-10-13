@@ -38,6 +38,7 @@ go install github.com/burrr-ai/comwit-cli/cmd/comwit@latest
 
 ```sh
 comwit login --token <cwt_token>     # authenticate (token from the dashboard)
+comwit auth export-token --env-out .env # merge login into local COMWIT_CLOUD_TOKEN
 comwit projects list
 comwit databases create --project <id> --name <name>
 comwit databases create --project <id> --name <name> --from-file ./app.sqlite --token-out ./database.token
@@ -62,6 +63,25 @@ comwit version
 
 After `comwit login`, Git clone and push at `https://git.cloud.comwit.io/<project>/<repository>.git` use the CLI token without a prompt.
 Remove the helper with `git config --global --unset credential.https://git.cloud.comwit.io.helper`.
+
+Local project handoffs require **v0.1.11 or later** for
+`comwit auth export-token --env-out .env`. v0.1.10 does not have the `auth`
+command. Once v0.1.11 is released, rerun the installer above (or `comwit update`);
+update npm installs with `npm install -g comwit-cli@latest`, then check
+`comwit version` in the terminal used for setup.
+
+The export command copies the saved personal `cwt_` token to
+`COMWIT_CLOUD_TOKEN` without printing it or passing it through command arguments.
+It creates or atomically merges the required `--env-out` file, preserving other
+settings, comments, quoted multiline values, and line endings while replacing
+duplicate token assignments. The resulting file has mode `0600` on POSIX.
+Invalid dotenv syntax, symlink/non-regular destinations, and the login config
+itself are rejected without changing the file. Keep `.env` untracked and ignored
+by Git. The command reads the same login config (`COMWIT_CONFIG`,
+`XDG_CONFIG_HOME`, or `~/.config/comwit/config.json`) and makes no API request;
+it does not refresh expired credentials or change permissions. Run `comwit login`
+and export again if the token needs replacing. Personal tokens are for local
+development; deployed workloads should use scoped project-owned `cwp_` tokens.
 
 `databases execute` and the PITR commands above are available in v0.1.6 and
 require the matching platform-api deployment.

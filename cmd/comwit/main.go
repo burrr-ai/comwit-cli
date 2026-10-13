@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	version             = "0.1.10"
+	version             = "0.1.11"
 	defaultAPIURL       = "https://api.cloud.comwit.io"
 	defaultGitHubAPIURL = "https://api.github.com"
 	defaultGitHubRepo   = "burrr-ai/comwit-cli"
@@ -295,6 +295,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "login":
 		return login(args[1:], stdout, stderr)
+	case "auth":
+		return authCommand(args[1:], stdout)
 	case "git-credential":
 		return gitCredential(args[1:], os.Stdin, stdout)
 	case "projects":
@@ -324,6 +326,7 @@ func usage(w io.Writer) {
   comwit version
   comwit login [--project <id>]               (browser device login)
   comwit login --token <token> [--project <id>]
+  comwit auth export-token --env-out <path>  (merge login into COMWIT_CLOUD_TOKEN)
   comwit git-credential <get|store|erase>     (Git credential helper)
   comwit projects list
   comwit databases create --project <id> --name <name> [--from-file <path> | --from-dump <path> [--sqlite-out <path>]] [--token-out <path> --skip-local-checks --idempotency-key <key> --no-wait]
