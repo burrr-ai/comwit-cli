@@ -38,9 +38,10 @@ type fakeGitCall struct {
 	Stdin string   `json:"stdin,omitempty"`
 }
 
-// fakeGit appends each call to COMWIT_FAKE_GIT_LOG. `credential fill` answers
-// per COMWIT_FAKE_GIT_FILL: "helper" always, "after-approve" once a credential
-// was approved, anything else never.
+// fakeGit appends each call to COMWIT_FAKE_GIT_LOG. It reports Git Credential
+// Manager as the configured helper. `credential fill` answers per
+// COMWIT_FAKE_GIT_FILL: "helper" always, "after-approve" once a credential was
+// approved, anything else never.
 func fakeGit() {
 	call := fakeGitCall{Args: os.Args[1:]}
 	if len(call.Args) > 0 && call.Args[0] == "credential" {
@@ -62,6 +63,10 @@ func fakeGit() {
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil || f.Close() != nil {
 		os.Exit(1)
+	}
+	if reflect.DeepEqual(call.Args, []string{"config", "--get-all", "credential.helper"}) {
+		fmt.Print("manager\n")
+		os.Exit(0)
 	}
 	if !reflect.DeepEqual(call.Args, []string{"credential", "fill"}) {
 		os.Exit(0)
@@ -415,6 +420,7 @@ func TestGitAccessFallsBackToCredentialStore(t *testing.T) {
 		{"credential", "fill"},
 		{"config", "--global", "--unset-all", key},
 		{"config", "--global", "credential.https://git.cloud.comwit.io.interactive", "never"},
+		{"config", "--get-all", "credential.helper"},
 		{"credential", "reject"},
 		{"credential", "approve"},
 		{"credential", "fill"},
@@ -422,11 +428,59 @@ func TestGitAccessFallsBackToCredentialStore(t *testing.T) {
 	if got := fakeGitArgs(t, gitLog); !reflect.DeepEqual(got, wantArgs) {
 		t.Fatalf("git args = %q, want %q", got, wantArgs)
 	}
-	if calls[5].Stdin != "protocol=https\nhost=git.cloud.comwit.io\n\n" {
-		t.Fatalf("reject stdin = %q", calls[5].Stdin)
+	if calls[6].Stdin != "protocol=https\nhost=git.cloud.comwit.io\n\n" {
+		t.Fatalf("reject stdin = %q", calls[6].Stdin)
 	}
-	if calls[6].Stdin != "protocol=https\nhost=git.cloud.comwit.io\nusername=comwit\npassword=test-token\n\n" {
-		t.Fatalf("approve stdin = %q", calls[6].Stdin)
+	if calls[7].Stdin != "protocol=https\nhost=git.cloud.comwit.io\nusername=comwit\npassword=test-token\n\n" {
+		t.Fatalf("approve stdin = %q", calls[7].Stdin)
+	}
+}
+
+func TestGitAccessStoreSkipsHelper(t *testing.T) {
+	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("COMWIT_API_URL", "")
+	gitLog := fakeGitOnPath(t)
+	t.Setenv("COMWIT_FAKE_GIT_FILL", "after-approve")
+	if _, err := saveConfig(configFile{Token: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"auth", "setup-git", "--store"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "git access configured for git.cloud.comwit.io\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+	wantArgs := [][]string{
+		{"config", "--global", "--unset-all", "credential.https://git.cloud.comwit.io.helper"},
+		{"config", "--global", "credential.https://git.cloud.comwit.io.interactive", "never"},
+		{"config", "--get-all", "credential.helper"},
+		{"credential", "reject"},
+		{"credential", "approve"},
+		{"credential", "fill"},
+	}
+	if got := fakeGitArgs(t, gitLog); !reflect.DeepEqual(got, wantArgs) {
+		t.Fatalf("git args = %q, want %q", got, wantArgs)
+	}
+
+	t.Setenv("COMWIT_FAKE_GIT_FILL", "never")
+	stdout.Reset()
+	err := run([]string{"auth", "setup-git", "--store"}, &stdout, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("store failure should exit non-zero")
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[1], "reason: Git credential store: ") ||
+		lines[2] != "next: "+gitStoreHint(runtime.GOOS)+", then run `comwit auth setup-git --store`" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "test-token") {
+		t.Fatal("output exposed the login token")
+	}
+	for _, args := range [][]string{{"auth", "setup-git", "--stor"}, {"auth", "setup-git", "--store", "x"}} {
+		if err := run(args, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || err.Error() != setupGitUsage {
+			t.Fatalf("%q err = %v", args, err)
+		}
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 
 const (
 	exportTokenUsage = "usage: comwit auth export-token --env-out <path>"
-	setupGitUsage    = "usage: comwit auth setup-git"
+	setupGitUsage    = "usage: comwit auth setup-git [--store]"
 )
 
 var personalTokenPattern = regexp.MustCompile(`^cwt_[0-9a-f]{64}$`)
@@ -30,10 +30,13 @@ func authCommand(args []string, stdout io.Writer) error {
 		return nil
 	}
 	if args[0] == "setup-git" {
-		if len(args) != 1 {
+		// --store skips the comwit helper and saves the login in the OS
+		// credential store, the legacy connect flow Windows handoffs use.
+		storeOnly := len(args) == 2 && args[1] == "--store"
+		if len(args) != 1 && !storeOnly {
 			return errors.New(setupGitUsage)
 		}
-		return configureGitAccess(stdout)
+		return configureGitAccess(stdout, storeOnly)
 	}
 	if args[0] != "export-token" {
 		return errors.New(exportTokenUsage)

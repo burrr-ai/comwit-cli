@@ -111,12 +111,13 @@ func (e *gitAccessError) Error() string {
 
 // configureGitAccess makes HTTPS Git use the CLI login for the Comwit Git host
 // and proves it with `git credential fill`. The comwit helper is preferred so
-// a later login rotates Git access too; when it cannot answer, the token is
-// handed to Git's own credential store, as the legacy connect prompt did.
-// The token is only ever passed on stdin, never printed.
-func configureGitAccess(stdout io.Writer) error {
+// a later login rotates Git access too; when it cannot answer, or storeOnly
+// asks for it, the token is handed to Git's own credential store, as the
+// legacy connect prompt did. The token is only ever passed on stdin, never
+// printed.
+func configureGitAccess(stdout io.Writer, storeOnly bool) error {
 	host := gitCredentialHost()
-	err := setupGitAccess(host)
+	err := setupGitAccess(host, storeOnly)
 	if err == nil {
 		fmt.Fprintf(stdout, "git access configured for %s\n", host)
 		return nil
@@ -131,10 +132,14 @@ func configureGitAccess(stdout io.Writer) error {
 	return failure
 }
 
-func setupGitAccess(host string) error {
+func setupGitAccess(host string, storeOnly bool) error {
+	command := gitSetupCommand
+	if storeOnly {
+		command += " --store"
+	}
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
-		return &gitAccessError{host, "git is not installed or not on PATH", "install Git, open a new shell, then run `" + gitSetupCommand + "`"}
+		return &gitAccessError{host, "git is not installed or not on PATH", "install Git, open a new shell, then run `" + command + "`"}
 	}
 	cfg, err := loadConfig()
 	token := strings.TrimSpace(cfg.Token)
@@ -142,12 +147,15 @@ func setupGitAccess(host string) error {
 		return &gitAccessError{host, "no CLI login found", "run `comwit login`"}
 	}
 
-	helperErr := installGitCredentialHelper(gitPath, host)
-	if helperErr == nil {
-		helperErr = verifyGitCredential(gitPath, host, token)
-	}
-	if helperErr == nil {
-		return nil
+	var helperErr error
+	if !storeOnly {
+		helperErr = installGitCredentialHelper(gitPath, host)
+		if helperErr == nil {
+			helperErr = verifyGitCredential(gitPath, host, token)
+		}
+		if helperErr == nil {
+			return nil
+		}
 	}
 	storeErr := storeGitCredential(gitPath, host, token)
 	if storeErr == nil {
@@ -156,15 +164,15 @@ func setupGitAccess(host string) error {
 	if storeErr == nil {
 		return nil
 	}
-	next := gitStoreHint(runtime.GOOS) + ", then run `" + gitSetupCommand + "`"
+	next := gitStoreHint(runtime.GOOS) + ", then run `" + command + "`"
 	if isPermissionFailure(helperErr) || isPermissionFailure(storeErr) {
-		next = "allow writing Git's global config and the OS credential store (for example, approve running outside the agent sandbox), then run `" + gitSetupCommand + "`"
+		next = "allow writing Git's global config and the OS credential store (for example, approve running outside the agent sandbox), then run `" + command + "`"
 	}
-	return &gitAccessError{
-		host,
-		fmt.Sprintf("comwit credential helper: %v; Git credential store: %v", helperErr, storeErr),
-		next,
+	reason := fmt.Sprintf("Git credential store: %v", storeErr)
+	if !storeOnly {
+		reason = fmt.Sprintf("comwit credential helper: %v; %s", helperErr, reason)
 	}
+	return &gitAccessError{host, reason, next}
 }
 
 // isPermissionFailure recognizes OS and Git wording for a blocked write, such
@@ -209,11 +217,21 @@ func installGitCredentialHelper(gitPath, host string) error {
 // then replaces any saved credential for the host with the CLI login. Git
 // Credential Manager is told never to open a window for this host, so a
 // later rejected token fails in the terminal instead of popping a dialog.
+// Without any helper, Windows and macOS get their usual store enabled, as the
+// legacy connect prompt asked the agent to do.
 func storeGitCredential(gitPath, host, token string) error {
 	// Exit status 5 only means the key was already absent.
 	_, _ = runGit(gitPath, "", "config", "--global", "--unset-all", "credential.https://"+host+".helper")
 	if _, err := runGit(gitPath, "", "config", "--global", "credential.https://"+host+".interactive", "never"); err != nil {
 		return err
+	}
+	// Exit status 1 means no helper is configured at any level.
+	if helpers, _ := runGit(gitPath, "", "config", "--get-all", "credential.helper"); strings.TrimSpace(helpers) == "" {
+		if helper := osCredentialHelper(runtime.GOOS); helper != "" {
+			if _, err := runGit(gitPath, "", "config", "--global", "credential.helper", helper); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := runGit(gitPath, "protocol=https\nhost="+host+"\n\n", "credential", "reject"); err != nil {
 		return err
@@ -270,14 +288,25 @@ func runGit(gitPath, stdin string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-// gitStoreHint names the command that enables Git's usual credential store.
-func gitStoreHint(goos string) string {
+// osCredentialHelper is the credential store Git ships enabled on the OS.
+// Linux has no common default, and `store` keeps plaintext, so it is never
+// enabled without the person running it.
+func osCredentialHelper(goos string) string {
 	switch goos {
 	case "windows":
-		return "run `git config --global credential.helper manager`"
+		return "manager"
 	case "darwin":
-		return "run `git config --global credential.helper osxkeychain`"
+		return "osxkeychain"
 	default:
-		return "run `git config --global credential.helper store`"
+		return ""
 	}
+}
+
+// gitStoreHint names the command that enables Git's usual credential store.
+func gitStoreHint(goos string) string {
+	helper := osCredentialHelper(goos)
+	if helper == "" {
+		helper = "store"
+	}
+	return "run `git config --global credential.helper " + helper + "`"
 }

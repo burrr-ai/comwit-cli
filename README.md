@@ -74,6 +74,7 @@ next: <the exact step to run, then `comwit auth setup-git`>
 ```
 
 `comwit auth setup-git` retries Git access with the saved login and exits non-zero while it still fails.
+`comwit auth setup-git --store` skips the comwit helper and saves the login straight into the OS credential store (Git Credential Manager on Windows, Keychain on macOS, enabling it when no helper is set), the legacy connect flow that Windows handoffs use. A later `comwit login` switches back to the helper; run `--store` again after it on Windows.
 Remove the helper with `git config --global --unset-all credential.https://git.cloud.comwit.io.helper`.
 
 Local project handoffs require **v0.1.11 or later** for
