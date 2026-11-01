@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	version             = "0.1.11"
+	version             = "0.1.13"
 	defaultAPIURL       = "https://api.cloud.comwit.io"
 	defaultGitHubAPIURL = "https://api.github.com"
 	defaultGitHubRepo   = "burrr-ai/comwit-cli"
@@ -327,6 +327,7 @@ func usage(w io.Writer) {
   comwit login [--project <id>]               (browser device login)
   comwit login --token <token> [--project <id>]
   comwit auth export-token --env-out <path>  (merge login into COMWIT_CLOUD_TOKEN)
+  comwit auth setup-git [--store]             (retry Git access; --store, the Windows default, uses the OS credential store)
   comwit git-credential <get|store|erase>     (Git credential helper)
   comwit projects list
   comwit databases create --project <id> --name <name> [--from-file <path> | --from-dump <path> [--sqlite-out <path>]] [--token-out <path> --skip-local-checks --idempotency-key <key> --no-wait]
@@ -636,6 +637,11 @@ func login(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Check before device approval: an approved token that cannot be saved is
+	// lost, and the person would have to approve again.
+	if err := checkConfigWritable(stdout); err != nil {
+		return err
+	}
 	if strings.TrimSpace(*token) == "" {
 		return deviceLogin(stdout, stderr, strings.TrimSpace(*project))
 	}
@@ -649,7 +655,7 @@ func login(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "Saved credentials to %s\n", path)
-	configureGitCredentialHelper(stdout, stderr)
+	_ = configureGitAccess(stdout, false)
 	return nil
 }
 
@@ -702,7 +708,7 @@ func deviceLogin(stdout, stderr io.Writer, project string) error {
 				return err
 			}
 			fmt.Fprintf(stdout, "Logged in. Saved credentials to %s\n", path)
-			configureGitCredentialHelper(stdout, stderr)
+			_ = configureGitAccess(stdout, false)
 			return nil
 		case "pending":
 			continue
@@ -1797,6 +1803,31 @@ func saveConfig(cfg configFile) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// checkConfigWritable proves the login config can be written, printing the
+// same reason/next block as Git access when it cannot.
+func checkConfigWritable(stdout io.Writer) error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	err = os.MkdirAll(dir, 0o700)
+	if err == nil {
+		var f *os.File
+		if f, err = os.CreateTemp(dir, ".comwit-write-check-*"); err == nil {
+			f.Close()
+			os.Remove(f.Name())
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	fmt.Fprintf(stdout, "login not started: cannot write %s\n", path)
+	fmt.Fprintf(stdout, "reason: %v\n", err)
+	fmt.Fprintf(stdout, "next: allow writing to %s (for example, approve running outside the agent sandbox), then run `comwit login` again\n", dir)
+	return fmt.Errorf("login not started: cannot write %s", path)
 }
 
 func configPath() (string, error) {
