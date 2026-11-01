@@ -156,11 +156,33 @@ func setupGitAccess(host string) error {
 	if storeErr == nil {
 		return nil
 	}
+	next := gitStoreHint(runtime.GOOS) + ", then run `" + gitSetupCommand + "`"
+	if isPermissionFailure(helperErr) || isPermissionFailure(storeErr) {
+		next = "allow writing Git's global config and the OS credential store (for example, approve running outside the agent sandbox), then run `" + gitSetupCommand + "`"
+	}
 	return &gitAccessError{
 		host,
 		fmt.Sprintf("comwit credential helper: %v; Git credential store: %v", helperErr, storeErr),
-		gitStoreHint(runtime.GOOS) + ", then run `" + gitSetupCommand + "`",
+		next,
 	}
+}
+
+// isPermissionFailure recognizes OS and Git wording for a blocked write, such
+// as an agent sandbox or folder permission refusing ~/.gitconfig.
+func isPermissionFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	for _, marker := range []string{"permission denied", "access is denied", "operation not permitted", "could not lock config file"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // installGitCredentialHelper registers the comwit helper for the Git host. The
@@ -184,10 +206,15 @@ func installGitCredentialHelper(gitPath, host string) error {
 }
 
 // storeGitCredential removes the comwit helper so the OS helper applies again,
-// then replaces any saved credential for the host with the CLI login.
+// then replaces any saved credential for the host with the CLI login. Git
+// Credential Manager is told never to open a window for this host, so a
+// later rejected token fails in the terminal instead of popping a dialog.
 func storeGitCredential(gitPath, host, token string) error {
 	// Exit status 5 only means the key was already absent.
 	_, _ = runGit(gitPath, "", "config", "--global", "--unset-all", "credential.https://"+host+".helper")
+	if _, err := runGit(gitPath, "", "config", "--global", "credential.https://"+host+".interactive", "never"); err != nil {
+		return err
+	}
 	if _, err := runGit(gitPath, "protocol=https\nhost="+host+"\n\n", "credential", "reject"); err != nil {
 		return err
 	}

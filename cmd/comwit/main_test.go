@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -413,6 +414,7 @@ func TestGitAccessFallsBackToCredentialStore(t *testing.T) {
 		{"config", "--global", "--add", key, calls[1].Args[4]},
 		{"credential", "fill"},
 		{"config", "--global", "--unset-all", key},
+		{"config", "--global", "credential.https://git.cloud.comwit.io.interactive", "never"},
 		{"credential", "reject"},
 		{"credential", "approve"},
 		{"credential", "fill"},
@@ -420,11 +422,11 @@ func TestGitAccessFallsBackToCredentialStore(t *testing.T) {
 	if got := fakeGitArgs(t, gitLog); !reflect.DeepEqual(got, wantArgs) {
 		t.Fatalf("git args = %q, want %q", got, wantArgs)
 	}
-	if calls[4].Stdin != "protocol=https\nhost=git.cloud.comwit.io\n\n" {
-		t.Fatalf("reject stdin = %q", calls[4].Stdin)
+	if calls[5].Stdin != "protocol=https\nhost=git.cloud.comwit.io\n\n" {
+		t.Fatalf("reject stdin = %q", calls[5].Stdin)
 	}
-	if calls[5].Stdin != "protocol=https\nhost=git.cloud.comwit.io\nusername=comwit\npassword=test-token\n\n" {
-		t.Fatalf("approve stdin = %q", calls[5].Stdin)
+	if calls[6].Stdin != "protocol=https\nhost=git.cloud.comwit.io\nusername=comwit\npassword=test-token\n\n" {
+		t.Fatalf("approve stdin = %q", calls[6].Stdin)
 	}
 }
 
@@ -453,6 +455,46 @@ func TestGitAccessFailureNamesNextStep(t *testing.T) {
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "test-token") {
 		t.Fatal("output exposed the login token")
+	}
+}
+
+func TestGitAccessPermissionFailureNamesPermission(t *testing.T) {
+	for _, text := range []string{
+		"git config failed: error: could not lock config file C:/Users/me/.gitconfig: Permission denied",
+		"git credential approve failed: fatal: Access is denied.",
+	} {
+		if !isPermissionFailure(errors.New(text)) {
+			t.Errorf("%q not recognized as a permission failure", text)
+		}
+	}
+	if isPermissionFailure(errors.New("git credential fill failed: fatal: terminal prompts disabled")) || isPermissionFailure(nil) {
+		t.Error("prompt failure treated as permission failure")
+	}
+}
+
+func TestLoginStopsBeforeApprovalWhenConfigIsNotWritable(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(blocker, "comwit", "config.json")
+	t.Setenv("COMWIT_CONFIG", path)
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++ }))
+	defer server.Close()
+	t.Setenv("COMWIT_API_URL", server.URL)
+	var stdout bytes.Buffer
+	err := run([]string{"login"}, &stdout, &bytes.Buffer{})
+	if err == nil || err.Error() != "login not started: cannot write "+path {
+		t.Fatalf("err = %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 3 || lines[0] != "login not started: cannot write "+path || !strings.HasPrefix(lines[1], "reason: ") ||
+		lines[2] != "next: allow writing to "+filepath.Dir(path)+" (for example, approve running outside the agent sandbox), then run `comwit login` again" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if requests != 0 {
+		t.Fatalf("device login started %d requests before the config check", requests)
 	}
 }
 

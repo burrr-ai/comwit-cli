@@ -63,7 +63,8 @@ comwit version
 
 After `comwit login`, Git clone and push at `https://git.cloud.comwit.io/<project>/<repository>.git` use the CLI token without a prompt.
 Login registers `comwit git-credential` for that host only, ahead of any inherited helper such as Git Credential Manager on Windows, and checks it with `git credential fill`.
-If the helper cannot answer, login saves the token in Git's own credential store instead.
+If the helper cannot answer, login saves the token in Git's own credential store instead and sets `credential.https://<host>.interactive never` so Git Credential Manager never opens a window for that host.
+Login checks that it can write its config before showing a device code, so an approval is never lost to a blocked write; when it cannot, it prints `login not started: cannot write <path>` with the same `reason:`/`next:` lines and exits non-zero.
 Success prints `git access configured for <host>`. Otherwise login still succeeds and prints, for the agent or person running it:
 
 ```text
