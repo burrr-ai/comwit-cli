@@ -26,6 +26,11 @@ const (
 // dialog nobody can see cannot hang an agent-run login.
 var gitAccessTimeout = 20 * time.Second
 
+// defaultGitStore sends Windows straight to the OS credential store. Agents
+// there cannot rely on the comwit helper chain, so login does what the legacy
+// connect prompt did instead of trying the helper first.
+var defaultGitStore = runtime.GOOS == "windows"
+
 // gitCredential implements the stdin/stdout protocol used by Git credential helpers.
 func gitCredential(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) != 1 || (args[0] != "get" && args[0] != "store" && args[0] != "erase") {
@@ -110,21 +115,25 @@ func (e *gitAccessError) Error() string {
 }
 
 // configureGitAccess makes HTTPS Git use the CLI login for the Comwit Git host
-// and proves it with `git credential fill`. The comwit helper is preferred so
-// a later login rotates Git access too; when it cannot answer, or storeOnly
-// asks for it, the token is handed to Git's own credential store, as the
-// legacy connect prompt did. The token is only ever passed on stdin, never
-// printed.
-func configureGitAccess(stdout io.Writer, storeOnly bool) error {
+// and proves it with `git credential fill`. Outside Windows the comwit helper
+// is preferred so a later login rotates Git access too. On Windows, with
+// forceStore, or when the helper cannot answer, the token is handed to Git's
+// own credential store, as the legacy connect prompt did. The token is only
+// ever passed on stdin, never printed.
+func configureGitAccess(stdout io.Writer, forceStore bool) error {
 	host := gitCredentialHost()
-	err := setupGitAccess(host, storeOnly)
+	command := gitSetupCommand
+	if forceStore && !defaultGitStore {
+		command += " --store"
+	}
+	err := setupGitAccess(host, forceStore || defaultGitStore, command)
 	if err == nil {
 		fmt.Fprintf(stdout, "git access configured for %s\n", host)
 		return nil
 	}
 	var failure *gitAccessError
 	if !errors.As(err, &failure) {
-		failure = &gitAccessError{host: host, reason: err.Error(), next: "run `" + gitSetupCommand + "`"}
+		failure = &gitAccessError{host: host, reason: err.Error(), next: "run `" + command + "`"}
 	}
 	fmt.Fprintf(stdout, "git access not configured for %s\n", host)
 	fmt.Fprintf(stdout, "reason: %s\n", failure.reason)
@@ -132,11 +141,7 @@ func configureGitAccess(stdout io.Writer, storeOnly bool) error {
 	return failure
 }
 
-func setupGitAccess(host string, storeOnly bool) error {
-	command := gitSetupCommand
-	if storeOnly {
-		command += " --store"
-	}
+func setupGitAccess(host string, storeOnly bool, command string) error {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		return &gitAccessError{host, "git is not installed or not on PATH", "install Git, open a new shell, then run `" + command + "`"}
@@ -166,7 +171,7 @@ func setupGitAccess(host string, storeOnly bool) error {
 	}
 	next := gitStoreHint(runtime.GOOS) + ", then run `" + command + "`"
 	if isPermissionFailure(helperErr) || isPermissionFailure(storeErr) {
-		next = "allow writing Git's global config and the OS credential store (for example, approve running outside the agent sandbox), then run `" + command + "`"
+		next = "run `" + command + "` again with permission to write outside the project folder (it writes Git's global config in the home folder and the OS credential store)"
 	}
 	reason := fmt.Sprintf("Git credential store: %v", storeErr)
 	if !storeOnly {

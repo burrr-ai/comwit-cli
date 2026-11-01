@@ -39,7 +39,8 @@ type fakeGitCall struct {
 }
 
 // fakeGit appends each call to COMWIT_FAKE_GIT_LOG. It reports Git Credential
-// Manager as the configured helper. `credential fill` answers per
+// Manager as the configured helper and, with COMWIT_FAKE_GIT_DENY_CONFIG,
+// refuses global config writes. `credential fill` answers per
 // COMWIT_FAKE_GIT_FILL: "helper" always, "after-approve" once a credential was
 // approved, anything else never.
 func fakeGit() {
@@ -63,6 +64,10 @@ func fakeGit() {
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil || f.Close() != nil {
 		os.Exit(1)
+	}
+	if os.Getenv("COMWIT_FAKE_GIT_DENY_CONFIG") == "1" && len(call.Args) > 1 && call.Args[0] == "config" && call.Args[1] == "--global" {
+		fmt.Fprintln(os.Stderr, "error: could not lock config file C:/Users/me/.gitconfig: Permission denied")
+		os.Exit(255)
 	}
 	if reflect.DeepEqual(call.Args, []string{"config", "--get-all", "credential.helper"}) {
 		fmt.Print("manager\n")
@@ -202,6 +207,7 @@ func TestDeployUploadStreamsFileWithContentLength(t *testing.T) {
 }
 
 func TestLoginWritesConfig(t *testing.T) {
+	useGitStoreDefault(t, false)
 	dir := t.TempDir()
 	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
 	t.Setenv("COMWIT_API_URL", "")
@@ -247,6 +253,15 @@ func TestLoginWritesConfig(t *testing.T) {
 	if got := fakeGitArgs(t, gitLog); !reflect.DeepEqual(got, want) {
 		t.Fatalf("git args = %q, want %q", got, want)
 	}
+}
+
+// useGitStoreDefault pins the Windows store default so helper and store
+// paths are tested the same way on every OS.
+func useGitStoreDefault(t *testing.T, store bool) {
+	t.Helper()
+	previous := defaultGitStore
+	defaultGitStore = store
+	t.Cleanup(func() { defaultGitStore = previous })
 }
 
 func fakeGitArgs(t *testing.T, log string) [][]string {
@@ -395,6 +410,7 @@ func TestLoginWithoutGitStillSucceeds(t *testing.T) {
 }
 
 func TestGitAccessFallsBackToCredentialStore(t *testing.T) {
+	useGitStoreDefault(t, false)
 	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	t.Setenv("COMWIT_API_URL", "")
 	gitLog := fakeGitOnPath(t)
@@ -437,6 +453,7 @@ func TestGitAccessFallsBackToCredentialStore(t *testing.T) {
 }
 
 func TestGitAccessStoreSkipsHelper(t *testing.T) {
+	useGitStoreDefault(t, false)
 	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	t.Setenv("COMWIT_API_URL", "")
 	gitLog := fakeGitOnPath(t)
@@ -485,6 +502,7 @@ func TestGitAccessStoreSkipsHelper(t *testing.T) {
 }
 
 func TestGitAccessFailureNamesNextStep(t *testing.T) {
+	useGitStoreDefault(t, false)
 	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	t.Setenv("COMWIT_API_URL", "")
 	fakeGitOnPath(t)
@@ -552,6 +570,72 @@ func TestLoginStopsBeforeApprovalWhenConfigIsNotWritable(t *testing.T) {
 	}
 }
 
+func TestWindowsLoginGoesStraightToStore(t *testing.T) {
+	useGitStoreDefault(t, true)
+	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("COMWIT_API_URL", "")
+	gitLog := fakeGitOnPath(t)
+	t.Setenv("COMWIT_FAKE_GIT_FILL", "after-approve")
+	var stdout bytes.Buffer
+	if err := run([]string{"login", "--token", "test-token"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(stdout.String(), "git access configured for git.cloud.comwit.io\n") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	got := fakeGitArgs(t, gitLog)
+	if len(got) == 0 || !reflect.DeepEqual(got[0], []string{"config", "--global", "--unset-all", "credential.https://git.cloud.comwit.io.helper"}) {
+		t.Fatalf("Windows login tried the helper first: %q", got)
+	}
+
+	t.Setenv("COMWIT_FAKE_GIT_DENY_CONFIG", "1")
+	stdout.Reset()
+	if err := run([]string{"auth", "setup-git"}, &stdout, &bytes.Buffer{}); err == nil {
+		t.Fatal("blocked config write should exit non-zero")
+	}
+	want := "next: run `comwit auth setup-git` again with permission to write outside the project folder (it writes Git's global config in the home folder and the OS credential store)\n"
+	if !strings.HasSuffix(stdout.String(), want) || strings.Contains(stdout.String(), "test-token") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+// TestGitAccessStoreWithRealGitOnWindows saves and reads the login through the
+// Git Credential Manager that Git for Windows enables, as Windows logins do.
+func TestGitAccessStoreWithRealGitOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("uses Git Credential Manager from Git for Windows")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	useGitStoreDefault(t, true)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(dir, "gitconfig"))
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	t.Setenv("COMWIT_API_URL", "https://api.comwit.invalid")
+	if _, err := saveConfig(configFile{Token: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cmd := exec.Command("git", "credential", "reject")
+		cmd.Stdin = strings.NewReader("protocol=https\nhost=git.comwit.invalid\n\n")
+		cmd.Env = append(os.Environ(), "GCM_INTERACTIVE=never")
+		_ = cmd.Run()
+	})
+	var stdout bytes.Buffer
+	if err := run([]string{"auth", "setup-git"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("setup-git: %v\nstdout: %s", err, stdout.String())
+	}
+	if stdout.String() != "git access configured for git.comwit.invalid\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	out, err := exec.Command("git", "config", "--global", "--get", "credential.https://git.comwit.invalid.interactive").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "never" {
+		t.Fatalf("interactive = %q, %v", out, err)
+	}
+}
+
 func TestGitAccessWithoutLogin(t *testing.T) {
 	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	t.Setenv("COMWIT_API_URL", "")
@@ -570,6 +654,7 @@ func TestGitAccessWithoutLogin(t *testing.T) {
 // Credential Manager, must be skipped. The host is fake so a fallback could
 // never touch a real saved credential.
 func TestGitAccessWithRealGit(t *testing.T) {
+	useGitStoreDefault(t, false)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}

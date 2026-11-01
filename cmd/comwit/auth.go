@@ -31,7 +31,7 @@ func authCommand(args []string, stdout io.Writer) error {
 	}
 	if args[0] == "setup-git" {
 		// --store skips the comwit helper and saves the login in the OS
-		// credential store, the legacy connect flow Windows handoffs use.
+		// credential store, the legacy connect flow Windows always uses.
 		storeOnly := len(args) == 2 && args[1] == "--store"
 		if len(args) != 1 && !storeOnly {
 			return errors.New(setupGitUsage)
