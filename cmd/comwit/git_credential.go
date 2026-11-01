@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,10 +12,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 )
 
-const defaultGitHost = "git.cloud.comwit.io"
+const (
+	defaultGitHost  = "git.cloud.comwit.io"
+	gitSetupCommand = "comwit auth setup-git"
+)
+
+// gitAccessTimeout bounds each Git call so a credential helper waiting on a
+// dialog nobody can see cannot hang an agent-run login.
+var gitAccessTimeout = 20 * time.Second
 
 // gitCredential implements the stdin/stdout protocol used by Git credential helpers.
 func gitCredential(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -80,29 +91,166 @@ func gitCredentialHost() string {
 	return host
 }
 
-func gitCredentialHelperValue(executable string) string {
+// Git runs `!` helpers through sh, including Git for Windows' bundled MSYS sh,
+// so Windows paths use forward slashes there.
+func gitCredentialHelperValue(goos, executable string) string {
+	if goos == "windows" {
+		executable = strings.ReplaceAll(executable, `\`, "/")
+	}
 	return "!'" + strings.ReplaceAll(executable, "'", "'\\''") + "' git-credential"
 }
 
-func configureGitCredentialHelper(stdout, stderr io.Writer) {
+// gitAccessError carries the agent-readable reason and the one next step.
+type gitAccessError struct {
+	host, reason, next string
+}
+
+func (e *gitAccessError) Error() string {
+	return "git access not configured for " + e.host
+}
+
+// configureGitAccess makes HTTPS Git use the CLI login for the Comwit Git host
+// and proves it with `git credential fill`. The comwit helper is preferred so
+// a later login rotates Git access too; when it cannot answer, the token is
+// handed to Git's own credential store, as the legacy connect prompt did.
+// The token is only ever passed on stdin, never printed.
+func configureGitAccess(stdout io.Writer) error {
+	host := gitCredentialHost()
+	err := setupGitAccess(host)
+	if err == nil {
+		fmt.Fprintf(stdout, "git access configured for %s\n", host)
+		return nil
+	}
+	var failure *gitAccessError
+	if !errors.As(err, &failure) {
+		failure = &gitAccessError{host: host, reason: err.Error(), next: "run `" + gitSetupCommand + "`"}
+	}
+	fmt.Fprintf(stdout, "git access not configured for %s\n", host)
+	fmt.Fprintf(stdout, "reason: %s\n", failure.reason)
+	fmt.Fprintf(stdout, "next: %s\n", failure.next)
+	return failure
+}
+
+func setupGitAccess(host string) error {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
-		fmt.Fprintln(stderr, "warning: git not found on PATH; git access was not configured")
-		return
+		return &gitAccessError{host, "git is not installed or not on PATH", "install Git, open a new shell, then run `" + gitSetupCommand + "`"}
 	}
+	cfg, err := loadConfig()
+	token := strings.TrimSpace(cfg.Token)
+	if err != nil || token == "" || strings.ContainsAny(token, "\r\n") {
+		return &gitAccessError{host, "no CLI login found", "run `comwit login`"}
+	}
+
+	helperErr := installGitCredentialHelper(gitPath, host)
+	if helperErr == nil {
+		helperErr = verifyGitCredential(gitPath, host, token)
+	}
+	if helperErr == nil {
+		return nil
+	}
+	storeErr := storeGitCredential(gitPath, host, token)
+	if storeErr == nil {
+		storeErr = verifyGitCredential(gitPath, host, token)
+	}
+	if storeErr == nil {
+		return nil
+	}
+	return &gitAccessError{
+		host,
+		fmt.Sprintf("comwit credential helper: %v; Git credential store: %v", helperErr, storeErr),
+		gitStoreHint(runtime.GOOS) + ", then run `" + gitSetupCommand + "`",
+	}
+}
+
+// installGitCredentialHelper registers the comwit helper for the Git host. The
+// empty value first resets helpers inherited from system or global config,
+// such as Git Credential Manager on Windows, which would otherwise be asked
+// first and prompt or fail where no terminal or desktop is available.
+func installGitCredentialHelper(gitPath, host string) error {
 	executable, err := os.Executable()
 	if err == nil {
 		executable, err = filepath.EvalSymlinks(executable)
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "warning: could not find comwit executable for git access: %v\n", err)
-		return
+		return fmt.Errorf("cannot locate the comwit executable: %v", err)
 	}
-	host := gitCredentialHost()
-	cmd := exec.Command(gitPath, "config", "--global", "credential.https://"+host+".helper", gitCredentialHelperValue(executable))
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(stderr, "warning: could not configure git access for %s: %v\n", host, err)
-		return
+	key := "credential.https://" + host + ".helper"
+	if _, err := runGit(gitPath, "", "config", "--global", "--replace-all", key, ""); err != nil {
+		return err
 	}
-	fmt.Fprintf(stdout, "git access configured for %s\n", host)
+	_, err = runGit(gitPath, "", "config", "--global", "--add", key, gitCredentialHelperValue(runtime.GOOS, executable))
+	return err
+}
+
+// storeGitCredential removes the comwit helper so the OS helper applies again,
+// then replaces any saved credential for the host with the CLI login.
+func storeGitCredential(gitPath, host, token string) error {
+	// Exit status 5 only means the key was already absent.
+	_, _ = runGit(gitPath, "", "config", "--global", "--unset-all", "credential.https://"+host+".helper")
+	if _, err := runGit(gitPath, "protocol=https\nhost="+host+"\n\n", "credential", "reject"); err != nil {
+		return err
+	}
+	_, err := runGit(gitPath, "protocol=https\nhost="+host+"\nusername=comwit\npassword="+token+"\n\n", "credential", "approve")
+	return err
+}
+
+func verifyGitCredential(gitPath, host, token string) error {
+	out, err := runGit(gitPath, "protocol=https\nhost="+host+"\n\n", "credential", "fill")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
+		if line == "password="+token {
+			return nil
+		}
+	}
+	return errors.New("git returned a different saved credential")
+}
+
+// runGit runs git without any way to prompt and returns stdout. Errors carry
+// git's last stderr line only, because stdout may hold a credential.
+func runGit(gitPath, stdin string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitAccessTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, gitPath, args...)
+	cmd.Env = append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=",
+		"SSH_ASKPASS=",
+		"GCM_INTERACTIVE=never",
+		"GCM_GUI_PROMPT=false",
+	)
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("git %s timed out after %s", args[0]+" "+args[1], gitAccessTimeout)
+	}
+	if err != nil {
+		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+		detail := strings.TrimSpace(lines[len(lines)-1])
+		if detail == "" {
+			detail = err.Error()
+		}
+		if len(detail) > 200 {
+			detail = detail[:200]
+		}
+		return "", fmt.Errorf("git %s failed: %s", args[0]+" "+args[1], detail)
+	}
+	return stdout.String(), nil
+}
+
+// gitStoreHint names the command that enables Git's usual credential store.
+func gitStoreHint(goos string) string {
+	switch goos {
+	case "windows":
+		return "run `git config --global credential.helper manager`"
+	case "darwin":
+		return "run `git config --global credential.helper osxkeychain`"
+	default:
+		return "run `git config --global credential.helper store`"
+	}
 }

@@ -12,7 +12,10 @@ import (
 	"unicode/utf8"
 )
 
-const exportTokenUsage = "usage: comwit auth export-token --env-out <path>"
+const (
+	exportTokenUsage = "usage: comwit auth export-token --env-out <path>"
+	setupGitUsage    = "usage: comwit auth setup-git"
+)
 
 var personalTokenPattern = regexp.MustCompile(`^cwt_[0-9a-f]{64}$`)
 var envAssignmentPattern = regexp.MustCompile(`^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*`)
@@ -23,7 +26,14 @@ func authCommand(args []string, stdout io.Writer) error {
 	}
 	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		fmt.Fprintln(stdout, exportTokenUsage)
+		fmt.Fprintln(stdout, setupGitUsage)
 		return nil
+	}
+	if args[0] == "setup-git" {
+		if len(args) != 1 {
+			return errors.New(setupGitUsage)
+		}
+		return configureGitAccess(stdout)
 	}
 	if args[0] != "export-token" {
 		return errors.New(exportTokenUsage)

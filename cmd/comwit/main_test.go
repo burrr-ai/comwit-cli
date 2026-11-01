@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -18,14 +20,85 @@ import (
 )
 
 func init() {
-	if os.Getenv("COMWIT_FAKE_GIT") != "1" {
-		return
+	// Real Git runs this test binary as the comwit credential helper.
+	if os.Getenv("COMWIT_TEST_GIT_HELPER") == "1" && len(os.Args) > 1 && os.Args[1] == "git-credential" {
+		if err := gitCredential(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
-	args, err := json.Marshal(os.Args[1:])
-	if err != nil || os.WriteFile(os.Getenv("COMWIT_FAKE_GIT_LOG"), args, 0o600) != nil {
+	if os.Getenv("COMWIT_FAKE_GIT") == "1" {
+		fakeGit()
+	}
+}
+
+type fakeGitCall struct {
+	Args  []string `json:"args"`
+	Stdin string   `json:"stdin,omitempty"`
+}
+
+// fakeGit appends each call to COMWIT_FAKE_GIT_LOG. `credential fill` answers
+// per COMWIT_FAKE_GIT_FILL: "helper" always, "after-approve" once a credential
+// was approved, anything else never.
+func fakeGit() {
+	call := fakeGitCall{Args: os.Args[1:]}
+	if len(call.Args) > 0 && call.Args[0] == "credential" {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			os.Exit(1)
+		}
+		call.Stdin = string(data)
+	}
+	log := os.Getenv("COMWIT_FAKE_GIT_LOG")
+	previous, _ := readFakeGitCalls(log)
+	line, err := json.Marshal(call)
+	if err != nil {
 		os.Exit(1)
 	}
+	f, err := os.OpenFile(log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		os.Exit(1)
+	}
+	if _, err := f.Write(append(line, '\n')); err != nil || f.Close() != nil {
+		os.Exit(1)
+	}
+	if !reflect.DeepEqual(call.Args, []string{"credential", "fill"}) {
+		os.Exit(0)
+	}
+	answer := false
+	switch os.Getenv("COMWIT_FAKE_GIT_FILL") {
+	case "helper":
+		answer = true
+	case "after-approve":
+		for _, c := range previous {
+			answer = answer || reflect.DeepEqual(c.Args, []string{"credential", "approve"})
+		}
+	}
+	if !answer {
+		fmt.Fprintln(os.Stderr, "fatal: could not read Username for 'https://git.cloud.comwit.io': terminal prompts disabled")
+		os.Exit(128)
+	}
+	fmt.Print("protocol=https\nhost=git.cloud.comwit.io\nusername=comwit\npassword=test-token\n")
 	os.Exit(0)
+}
+
+func readFakeGitCalls(log string) ([]fakeGitCall, error) {
+	data, err := os.ReadFile(log)
+	if err != nil {
+		return nil, err
+	}
+	var calls []fakeGitCall
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var call fakeGitCall
+		if err := json.Unmarshal([]byte(line), &call); err != nil {
+			return nil, err
+		}
+		calls = append(calls, call)
+	}
+	return calls, nil
 }
 
 func TestVersionCommand(t *testing.T) {
@@ -151,14 +224,6 @@ func TestLoginWritesConfig(t *testing.T) {
 	if !strings.Contains(stdout.String(), "git access configured for git.cloud.comwit.io\n") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
-	gitArgs, err := os.ReadFile(gitLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	if err := json.Unmarshal(gitArgs, &got); err != nil {
-		t.Fatal(err)
-	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -167,10 +232,28 @@ func TestLoginWritesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"config", "--global", "credential.https://git.cloud.comwit.io.helper", gitCredentialHelperValue(executable)}
-	if !reflect.DeepEqual(got, want) {
+	key := "credential.https://git.cloud.comwit.io.helper"
+	want := [][]string{
+		{"config", "--global", "--replace-all", key, ""},
+		{"config", "--global", "--add", key, gitCredentialHelperValue(runtime.GOOS, executable)},
+		{"credential", "fill"},
+	}
+	if got := fakeGitArgs(t, gitLog); !reflect.DeepEqual(got, want) {
 		t.Fatalf("git args = %q, want %q", got, want)
 	}
+}
+
+func fakeGitArgs(t *testing.T, log string) [][]string {
+	t.Helper()
+	calls, err := readFakeGitCalls(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var args [][]string
+	for _, call := range calls {
+		args = append(args, call.Args)
+	}
+	return args
 }
 
 func fakeGitOnPath(t *testing.T) string {
@@ -199,9 +282,10 @@ func fakeGitOnPath(t *testing.T) string {
 	if err := target.Close(); err != nil {
 		t.Fatal(err)
 	}
-	log := filepath.Join(dir, "git-args.json")
+	log := filepath.Join(dir, "git-calls.jsonl")
 	t.Setenv("COMWIT_FAKE_GIT", "1")
 	t.Setenv("COMWIT_FAKE_GIT_LOG", log)
+	t.Setenv("COMWIT_FAKE_GIT_FILL", "helper")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return log
 }
@@ -273,13 +357,13 @@ func TestGitCredentialHost(t *testing.T) {
 }
 
 func TestGitCredentialHelperValue(t *testing.T) {
-	tests := []struct{ executable, want string }{
-		{"/Applications/Comwit CLI/comwit", "!'/Applications/Comwit CLI/comwit' git-credential"},
-		{`C:\Program Files\Comwit\comwit.exe`, `!'C:\Program Files\Comwit\comwit.exe' git-credential`},
-		{"/Users/O'Brien/comwit", "!'/Users/O'\\''Brien/comwit' git-credential"},
+	tests := []struct{ goos, executable, want string }{
+		{"darwin", "/Applications/Comwit CLI/comwit", "!'/Applications/Comwit CLI/comwit' git-credential"},
+		{"windows", `C:\Users\홍 길동\AppData\Roaming\npm\node_modules\comwit-cli\npm\dist\comwit-win32-x64.exe`, "!'C:/Users/홍 길동/AppData/Roaming/npm/node_modules/comwit-cli/npm/dist/comwit-win32-x64.exe' git-credential"},
+		{"linux", "/Users/O'Brien/comwit", "!'/Users/O'\\''Brien/comwit' git-credential"},
 	}
 	for _, tt := range tests {
-		if got := gitCredentialHelperValue(tt.executable); got != tt.want {
+		if got := gitCredentialHelperValue(tt.goos, tt.executable); got != tt.want {
 			t.Errorf("helper value = %q, want %q", got, tt.want)
 		}
 	}
@@ -287,16 +371,147 @@ func TestGitCredentialHelperValue(t *testing.T) {
 
 func TestLoginWithoutGitStillSucceeds(t *testing.T) {
 	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("COMWIT_API_URL", "")
 	t.Setenv("PATH", t.TempDir())
 	var stdout, stderr bytes.Buffer
 	if err := run([]string{"login", "--token", "test-token"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if got := stderr.String(); got != "warning: git not found on PATH; git access was not configured\n" {
-		t.Fatalf("stderr = %q", got)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if strings.Contains(stdout.String(), "git access configured") {
+	want := "git access not configured for git.cloud.comwit.io\n" +
+		"reason: git is not installed or not on PATH\n" +
+		"next: install Git, open a new shell, then run `comwit auth setup-git`\n"
+	if !strings.HasSuffix(stdout.String(), want) {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestGitAccessFallsBackToCredentialStore(t *testing.T) {
+	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("COMWIT_API_URL", "")
+	gitLog := fakeGitOnPath(t)
+	t.Setenv("COMWIT_FAKE_GIT_FILL", "after-approve")
+	if _, err := saveConfig(configFile{Token: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"auth", "setup-git"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "git access configured for git.cloud.comwit.io\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+	calls, err := readFakeGitCalls(gitLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "credential.https://git.cloud.comwit.io.helper"
+	wantArgs := [][]string{
+		{"config", "--global", "--replace-all", key, ""},
+		{"config", "--global", "--add", key, calls[1].Args[4]},
+		{"credential", "fill"},
+		{"config", "--global", "--unset-all", key},
+		{"credential", "reject"},
+		{"credential", "approve"},
+		{"credential", "fill"},
+	}
+	if got := fakeGitArgs(t, gitLog); !reflect.DeepEqual(got, wantArgs) {
+		t.Fatalf("git args = %q, want %q", got, wantArgs)
+	}
+	if calls[4].Stdin != "protocol=https\nhost=git.cloud.comwit.io\n\n" {
+		t.Fatalf("reject stdin = %q", calls[4].Stdin)
+	}
+	if calls[5].Stdin != "protocol=https\nhost=git.cloud.comwit.io\nusername=comwit\npassword=test-token\n\n" {
+		t.Fatalf("approve stdin = %q", calls[5].Stdin)
+	}
+}
+
+func TestGitAccessFailureNamesNextStep(t *testing.T) {
+	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("COMWIT_API_URL", "")
+	fakeGitOnPath(t)
+	t.Setenv("COMWIT_FAKE_GIT_FILL", "never")
+	if _, err := saveConfig(configFile{Token: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"auth", "setup-git"}, &stdout, &stderr)
+	if err == nil || err.Error() != "git access not configured for git.cloud.comwit.io" {
+		t.Fatalf("err = %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	terminal := "fatal: could not read Username for 'https://git.cloud.comwit.io': terminal prompts disabled"
+	want := []string{
+		"git access not configured for git.cloud.comwit.io",
+		"reason: comwit credential helper: git credential fill failed: " + terminal + "; Git credential store: git credential fill failed: " + terminal,
+		"next: " + gitStoreHint(runtime.GOOS) + ", then run `comwit auth setup-git`",
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("stdout lines = %q, want %q", lines, want)
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "test-token") {
+		t.Fatal("output exposed the login token")
+	}
+}
+
+func TestGitAccessWithoutLogin(t *testing.T) {
+	t.Setenv("COMWIT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("COMWIT_API_URL", "")
+	fakeGitOnPath(t)
+	var stdout bytes.Buffer
+	if err := run([]string{"auth", "setup-git"}, &stdout, &bytes.Buffer{}); err == nil {
+		t.Fatal("setup-git without login should fail")
+	}
+	if !strings.HasSuffix(stdout.String(), "reason: no CLI login found\nnext: run `comwit login`\n") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+// TestGitAccessWithRealGit runs the real Git credential chain with this test
+// binary as the helper. A helper configured earlier, standing in for Git
+// Credential Manager, must be skipped. The host is fake so a fallback could
+// never touch a real saved credential.
+func TestGitAccessWithRealGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	global := filepath.Join(dir, "gitconfig")
+	decoy := "[credential]\n\thelper = \"!f() { echo username=decoy; echo password=decoy; }; f\"\n"
+	if err := os.WriteFile(global, []byte(decoy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("COMWIT_TEST_GIT_HELPER", "1")
+	t.Setenv("COMWIT_CONFIG", filepath.Join(dir, "config.json"))
+	t.Setenv("COMWIT_API_URL", "https://api.comwit.invalid")
+	if _, err := saveConfig(configFile{Token: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"auth", "setup-git"}, &stdout, &stderr); err != nil {
+		t.Fatalf("setup-git: %v\nstdout: %s", err, stdout.String())
+	}
+	if stdout.String() != "git access configured for git.comwit.invalid\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	out, err := exec.Command("git", "config", "--global", "--get-all", "credential.https://git.comwit.invalid.helper").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n"); len(lines) != 2 || lines[0] != "" || !strings.HasSuffix(lines[1], "' git-credential") {
+		t.Fatalf("helper config = %q", out)
+	}
+	// A second login must leave exactly one reset and one comwit helper.
+	if err := run([]string{"auth", "setup-git"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := exec.Command("git", "config", "--global", "--get-all", "credential.https://git.comwit.invalid.helper").Output()
+	if err != nil || string(again) != string(out) {
+		t.Fatalf("helper config after second setup = %q, %v", again, err)
 	}
 }
 

@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	version             = "0.1.11"
+	version             = "0.1.13"
 	defaultAPIURL       = "https://api.cloud.comwit.io"
 	defaultGitHubAPIURL = "https://api.github.com"
 	defaultGitHubRepo   = "burrr-ai/comwit-cli"
@@ -327,6 +327,7 @@ func usage(w io.Writer) {
   comwit login [--project <id>]               (browser device login)
   comwit login --token <token> [--project <id>]
   comwit auth export-token --env-out <path>  (merge login into COMWIT_CLOUD_TOKEN)
+  comwit auth setup-git                       (retry Git access for the login)
   comwit git-credential <get|store|erase>     (Git credential helper)
   comwit projects list
   comwit databases create --project <id> --name <name> [--from-file <path> | --from-dump <path> [--sqlite-out <path>]] [--token-out <path> --skip-local-checks --idempotency-key <key> --no-wait]
@@ -649,7 +650,7 @@ func login(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "Saved credentials to %s\n", path)
-	configureGitCredentialHelper(stdout, stderr)
+	_ = configureGitAccess(stdout)
 	return nil
 }
 
@@ -702,7 +703,7 @@ func deviceLogin(stdout, stderr io.Writer, project string) error {
 				return err
 			}
 			fmt.Fprintf(stdout, "Logged in. Saved credentials to %s\n", path)
-			configureGitCredentialHelper(stdout, stderr)
+			_ = configureGitAccess(stdout)
 			return nil
 		case "pending":
 			continue
