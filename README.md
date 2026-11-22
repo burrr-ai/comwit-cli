@@ -95,6 +95,8 @@ token into app environment.
 
 `databases create --from-file` validates a standalone SQLite file, streams it
 with an exact content length, and waits for the new database to become ready.
+The file must be 100 bytes to 6 GiB. The platform enforces an upload deadline,
+so larger files need a fast connection.
 Use `--skip-local-checks` to omit the local integrity and foreign-key checks,
 `--idempotency-key` to resume a known attempt, or `--no-wait` to return after
 the upload is accepted; `--token-out` writes the logged-in connection token

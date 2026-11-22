@@ -1326,7 +1326,7 @@ func TestDatabasesCreateFromFilePreflightRejectionsDoNotCallAPI(t *testing.T) {
 		{name: "wal sidecar", path: wal, want: `sqlite3 src.db ".backup out.sqlite"`},
 		{name: "shm sidecar", path: shm, want: `sqlite3 src.db ".backup out.sqlite"`},
 		{name: "too small", path: tooSmall, want: "minimum 100 bytes"},
-		{name: "too large", path: tooLarge, want: "maximum 2 GiB"},
+		{name: "too large", path: tooLarge, want: "maximum 6 GiB"},
 		{name: "not sqlite", path: notSQLite, want: "not a SQLite database"},
 		{name: "integrity failure", path: corrupt, want: "integrity_check failed"},
 		{name: "not regular", path: filepath.Dir(valid), want: "regular file"},
@@ -1346,6 +1346,23 @@ func TestDatabasesCreateFromFilePreflightRejectionsDoNotCallAPI(t *testing.T) {
 
 	if _, err := preflightSQLiteSeedFile(corrupt, true); err != nil {
 		t.Fatalf("--skip-local-checks equivalent should accept header-valid corrupt fixture: %v", err)
+	}
+}
+
+func TestSQLiteSeedSizeBoundary(t *testing.T) {
+	if maxSQLiteSeedBytes != 6_442_450_944 {
+		t.Fatalf("maxSQLiteSeedBytes = %d, want exactly 6 GiB", maxSQLiteSeedBytes)
+	}
+	for _, size := range []int64{maxSQLiteSeedBytes - 1, maxSQLiteSeedBytes} {
+		if err := validateSQLiteSeedSize(size); err != nil {
+			t.Errorf("size %d rejected: %v", size, err)
+		}
+	}
+	if err := validateSQLiteSeedSize(maxSQLiteSeedBytes + 1); err == nil || !strings.Contains(err.Error(), "maximum 6 GiB") {
+		t.Fatalf("size above 6 GiB: %v", err)
+	}
+	if got := seedErrorMessage("SEED_FILE_TOO_LARGE"); !strings.Contains(got, "maximum 6 GiB") {
+		t.Fatalf("API size error = %q", got)
 	}
 }
 
