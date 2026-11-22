@@ -27,7 +27,7 @@ import (
 
 const (
 	minSQLiteSeedBytes     int64 = 100
-	maxSQLiteSeedBytes     int64 = 2 << 30
+	maxSQLiteSeedBytes     int64 = 6 << 30
 	seedRequestMaxAttempts       = 3
 	seedResponseMaxBytes   int64 = 1 << 20
 	seedWaitTimeout              = 70 * time.Minute
@@ -627,11 +627,8 @@ func preflightSQLiteSeedFile(path string, skipLocalChecks bool) (sqliteSeedFile,
 			return sqliteSeedFile{}, fmt.Errorf("inspect SQLite sidecar %s: %w", sidecar, err)
 		}
 	}
-	if info.Size() < minSQLiteSeedBytes {
-		return sqliteSeedFile{}, fmt.Errorf("the SQLite file is too small: %d bytes (minimum 100 bytes)", info.Size())
-	}
-	if info.Size() > maxSQLiteSeedBytes {
-		return sqliteSeedFile{}, fmt.Errorf("the SQLite file is too large: %d bytes (maximum 2 GiB)", info.Size())
+	if err := validateSQLiteSeedSize(info.Size()); err != nil {
+		return sqliteSeedFile{}, err
 	}
 
 	source, err := os.Open(path)
@@ -661,6 +658,16 @@ func preflightSQLiteSeedFile(path string, skipLocalChecks bool) (sqliteSeedFile,
 		return sqliteSeedFile{}, err
 	}
 	return sqliteSeedFile{Path: path, Size: info.Size(), SHA256: digest}, nil
+}
+
+func validateSQLiteSeedSize(size int64) error {
+	if size < minSQLiteSeedBytes {
+		return fmt.Errorf("the SQLite file is too small: %d bytes (minimum 100 bytes)", size)
+	}
+	if size > maxSQLiteSeedBytes {
+		return fmt.Errorf("the SQLite file is too large: %d bytes (maximum 6 GiB)", size)
+	}
+	return nil
 }
 
 func checkSQLiteSeedIntegrity(path string) error {
@@ -1232,7 +1239,7 @@ func seedErrorMessage(code string) string {
 	case "SEED_FILE_TOO_SMALL":
 		return "the file is too small to be a SQLite database (minimum 100 bytes)"
 	case "SEED_FILE_TOO_LARGE":
-		return "the SQLite file is too large (maximum 2 GiB)"
+		return "the SQLite file is too large (maximum 6 GiB)"
 	case "SEED_INTEGRITY_CHECK_FAILED":
 		return "the SQLite file failed its integrity check and may be corrupt"
 	case "SEED_FOREIGN_KEY_CHECK_FAILED":
